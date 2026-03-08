@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, BrowserActionDecision, ProviderName
 from .provider_registry import ProviderRegistry
@@ -49,6 +51,7 @@ class BrowserOrchestrator:
                 upload_approved=upload_approved,
             )
         except Exception as exc:
+            error_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,
@@ -60,6 +63,7 @@ class BrowserOrchestrator:
                 usage=None,
                 raw_text=None,
                 error=str(exc),
+                error_code=error_code,
             )
 
         await self._append_agent_log(session_id, "agent_steps.jsonl", result.model_dump())
@@ -180,6 +184,7 @@ class BrowserOrchestrator:
             usage=provider_decision.usage,
             raw_text=provider_decision.raw_text,
             error=None,
+            error_code=None,
         )
 
     @staticmethod

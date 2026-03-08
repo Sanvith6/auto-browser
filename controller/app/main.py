@@ -226,7 +226,7 @@ async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
             upload_approved=payload.upload_approved,
             provider_model=payload.provider_model,
         )
-        status_code = 200 if result.status != "error" else 502
+        status_code = 200 if result.status != "error" else (result.error_code or 502)
         if status_code != 200:
             raise HTTPException(status_code=status_code, detail=result.model_dump())
         return result.model_dump()

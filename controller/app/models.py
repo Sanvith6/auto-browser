@@ -161,6 +161,7 @@ class AgentStepResult(BaseModel):
     usage: dict[str, Any] | None = None
     raw_text: str | None = None
     error: str | None = None
+    error_code: int | None = None
 
 
 class AgentRunResult(BaseModel):
