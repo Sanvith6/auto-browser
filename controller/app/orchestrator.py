@@ -4,10 +4,11 @@ from typing import Any
 
 import httpx
 
+from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, BrowserActionDecision, ProviderName
 from .provider_registry import ProviderRegistry
-from .providers.base import ProviderDecision
+from .providers.base import ProviderAPIError, ProviderDecision
 
 
 class BrowserOrchestrator:
@@ -27,6 +28,7 @@ class BrowserOrchestrator:
         observation_limit: int = 40,
         context_hints: str | None = None,
         upload_approved: bool = False,
+        approval_id: str | None = None,
         provider_model: str | None = None,
         previous_steps: list[AgentStepResult] | None = None,
     ) -> AgentStepResult:
@@ -49,6 +51,35 @@ class BrowserOrchestrator:
                 observation=observation,
                 provider_decision=provider_decision,
                 upload_approved=upload_approved,
+                approval_id=approval_id,
+            )
+        except ApprovalRequiredError as exc:
+            result = AgentStepResult(
+                provider=provider_name,
+                model=model_name,
+                goal=goal,
+                status="approval_required",
+                observation=observation,
+                decision=provider_decision.decision.model_dump(),
+                execution=exc.payload,
+                usage=provider_decision.usage,
+                raw_text=provider_decision.raw_text,
+                error=None,
+                error_code=None,
+            )
+        except ProviderAPIError as exc:
+            result = AgentStepResult(
+                provider=provider_name,
+                model=model_name,
+                goal=goal,
+                status="error",
+                observation=observation,
+                decision={},
+                execution=None,
+                usage=None,
+                raw_text=None,
+                error=str(exc),
+                error_code=exc.status_code or (503 if exc.retryable else 502),
             )
         except Exception as exc:
             error_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
@@ -79,6 +110,7 @@ class BrowserOrchestrator:
         observation_limit: int = 40,
         context_hints: str | None = None,
         upload_approved: bool = False,
+        approval_id: str | None = None,
         provider_model: str | None = None,
     ) -> AgentRunResult:
         steps: list[AgentStepResult] = []
@@ -94,12 +126,13 @@ class BrowserOrchestrator:
                 observation_limit=observation_limit,
                 context_hints=context_hints,
                 upload_approved=upload_approved,
+                approval_id=approval_id,
                 provider_model=provider_model,
                 previous_steps=steps,
             )
             steps.append(step_result)
             model_name = step_result.model
-            if step_result.status in {"done", "takeover", "error"}:
+            if step_result.status in {"done", "takeover", "approval_required", "error"}:
                 final_status = step_result.status
                 break
             if index == max_steps - 1:
@@ -124,6 +157,7 @@ class BrowserOrchestrator:
         observation: dict[str, Any],
         provider_decision: ProviderDecision,
         upload_approved: bool,
+        approval_id: str | None,
     ) -> AgentStepResult:
         decision = provider_decision.decision
         execution: dict[str, Any] | None = None
@@ -134,40 +168,11 @@ class BrowserOrchestrator:
         elif decision.action == "request_human_takeover":
             execution = await self.manager.request_human_takeover(session_id, reason=decision.reason)
             status = "takeover"
-        elif decision.action == "navigate":
-            execution = await self.manager.navigate(session_id, decision.url or "")
-            status = "acted"
-        elif decision.action == "click":
-            execution = await self.manager.click(
+        elif decision.action in {"navigate", "click", "type", "press", "scroll", "upload"}:
+            execution = await self.manager.execute_decision(
                 session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                x=decision.x,
-                y=decision.y,
-            )
-            status = "acted"
-        elif decision.action == "type":
-            execution = await self.manager.type(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                text=decision.text or "",
-                clear_first=decision.clear_first,
-            )
-            status = "acted"
-        elif decision.action == "press":
-            execution = await self.manager.press(session_id, decision.key or "")
-            status = "acted"
-        elif decision.action == "scroll":
-            execution = await self.manager.scroll(session_id, decision.delta_x, decision.delta_y)
-            status = "acted"
-        elif decision.action == "upload":
-            execution = await self.manager.upload(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                file_path=decision.file_path or "",
-                approved=upload_approved,
+                decision,
+                approval_id=approval_id,
             )
             status = "acted"
         else:  # pragma: no cover - guarded by schema

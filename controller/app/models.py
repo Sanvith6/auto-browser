@@ -43,6 +43,7 @@ class UploadRequest(BaseModel):
     element_id: str | None = None
     file_path: str
     approved: bool = False
+    approval_id: str | None = None
 
 
 class SaveStorageStateRequest(BaseModel):
@@ -76,6 +77,17 @@ ActionName = Literal[
     "done",
 ]
 ProviderName = Literal["openai", "claude", "gemini"]
+RiskCategory = Literal[
+    "read",
+    "write",
+    "upload",
+    "post",
+    "payment",
+    "account_change",
+    "destructive",
+]
+ApprovalKind = Literal["upload", "post", "payment", "account_change", "destructive"]
+ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
 
 
 class BrowserActionDecision(BaseModel):
@@ -84,6 +96,7 @@ class BrowserActionDecision(BaseModel):
     action: ActionName
     reason: str = Field(min_length=1, max_length=1000)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    risk_category: RiskCategory | None = None
     element_id: str | None = None
     selector: str | None = None
     x: float | None = None
@@ -98,6 +111,16 @@ class BrowserActionDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_requirements(self) -> "BrowserActionDecision":
+        if self.risk_category is None:
+            if self.action in {"navigate", "scroll", "done"}:
+                self.risk_category = "read"
+            elif self.action == "upload":
+                self.risk_category = "upload"
+            elif self.action == "request_human_takeover":
+                self.risk_category = "write"
+            else:
+                self.risk_category = "write"
+
         has_click_target = bool(self.element_id or self.selector or (self.x is not None and self.y is not None))
         has_locator_target = bool(self.element_id or self.selector)
 
@@ -129,6 +152,7 @@ class AgentStepRequest(BaseModel):
     observation_limit: int = Field(default=40, ge=1, le=100)
     context_hints: str | None = Field(default=None, max_length=4000)
     upload_approved: bool = False
+    approval_id: str | None = None
 
 
 class AgentRunRequest(AgentStepRequest):
@@ -154,7 +178,7 @@ class AgentStepResult(BaseModel):
     provider: ProviderName
     model: str
     goal: str
-    status: Literal["acted", "done", "takeover", "error"]
+    status: Literal["acted", "done", "takeover", "approval_required", "error"]
     observation: dict[str, Any]
     decision: dict[str, Any]
     execution: dict[str, Any] | None = None
@@ -168,9 +192,28 @@ class AgentRunResult(BaseModel):
     provider: ProviderName
     model: str
     goal: str
-    status: Literal["acted", "done", "takeover", "error", "max_steps_reached"]
+    status: Literal["acted", "done", "takeover", "approval_required", "error", "max_steps_reached"]
     steps: list[AgentStepResult]
     final_session: dict[str, Any]
+
+
+class ApprovalRecord(BaseModel):
+    id: str
+    session_id: str
+    kind: ApprovalKind
+    status: ApprovalStatus
+    created_at: str
+    updated_at: str
+    reason: str
+    action: BrowserActionDecision
+    observation: dict[str, Any] | None = None
+    decision_comment: str | None = None
+    decided_at: str | None = None
+    executed_at: str | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 BROWSER_ACTION_SCHEMA = BrowserActionDecision.model_json_schema()

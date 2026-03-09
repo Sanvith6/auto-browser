@@ -5,9 +5,15 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/auth/*
 !data/auth/.gitkeep
+data/approvals/*
+!data/approvals/.gitkeep
+data/ssh/*
+!data/ssh/.gitkeep
 data/browser-profile/*
 !data/browser-profile/.gitkeep
 data/downloads/*
 !data/downloads/.gitkeep
+data/tunnels/*
+!data/tunnels/.gitkeep
 __pycache__/
 *.pyc

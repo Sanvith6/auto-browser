@@ -3,12 +3,15 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
 from .config import get_settings
 from .models import (
+    ApprovalDecisionRequest,
     AgentRunRequest,
     AgentStepRequest,
     ClickRequest,
@@ -51,6 +54,22 @@ app = FastAPI(
 app.mount("/artifacts", StaticFiles(directory=settings.artifact_root), name="artifacts")
 
 
+@app.middleware("http")
+async def require_api_bearer_token(request: Request, call_next):
+    if request.url.path in {"/healthz", "/readyz"} or not settings.api_bearer_token:
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    expected = f"Bearer {settings.api_bearer_token}"
+    if header != expected:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid bearer token"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -70,6 +89,58 @@ async def list_agent_providers() -> list[dict]:
     return [item.model_dump() for item in orchestrator.list_providers()]
 
 
+@app.get("/remote-access")
+async def get_remote_access() -> dict:
+    return manager.get_remote_access_info()
+
+
+@app.get("/approvals")
+async def list_approvals(status: str | None = None, session_id: str | None = None) -> list[dict]:
+    return await manager.list_approvals(status=status, session_id=session_id)
+
+
+@app.get("/approvals/{approval_id}")
+async def get_approval(approval_id: str) -> dict:
+    try:
+        return await manager.get_approval(approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
+
+
+@app.post("/approvals/{approval_id}/approve")
+async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict:
+    try:
+        return await manager.approve(approval_id, comment=payload.comment)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/approvals/{approval_id}/reject")
+async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict:
+    try:
+        return await manager.reject(approval_id, comment=payload.comment)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/approvals/{approval_id}/execute")
+async def execute_approval(approval_id: str) -> dict:
+    try:
+        return await manager.execute_approval(approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/sessions")
 async def list_sessions() -> list[dict]:
     return await manager.list_sessions()
@@ -87,6 +158,8 @@ async def create_session(payload: CreateSessionRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
@@ -118,6 +191,8 @@ async def navigate(session_id: str, payload: NavigateRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
 
 
 @app.post("/sessions/{session_id}/actions/click")
@@ -136,6 +211,8 @@ async def click(session_id: str, payload: ClickRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
 
 
 @app.post("/sessions/{session_id}/actions/type")
@@ -154,6 +231,8 @@ async def type_text(session_id: str, payload: TypeRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
 
 
 @app.post("/sessions/{session_id}/actions/press")
@@ -164,6 +243,8 @@ async def press_key(session_id: str, payload: PressRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
 
 
 @app.post("/sessions/{session_id}/actions/scroll")
@@ -185,6 +266,7 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
             element_id=payload.element_id,
             file_path=payload.file_path,
             approved=payload.approved,
+            approval_id=payload.approval_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
@@ -192,6 +274,8 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -224,6 +308,7 @@ async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
             observation_limit=payload.observation_limit,
             context_hints=payload.context_hints,
             upload_approved=payload.upload_approved,
+            approval_id=payload.approval_id,
             provider_model=payload.provider_model,
         )
         status_code = 200 if result.status != "error" else (result.error_code or 502)
@@ -247,6 +332,7 @@ async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict:
             observation_limit=payload.observation_limit,
             context_hints=payload.context_hints,
             upload_approved=payload.upload_approved,
+            approval_id=payload.approval_id,
             provider_model=payload.provider_model,
         )
         return result.model_dump()

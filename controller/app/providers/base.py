@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import mimetypes
 from abc import ABC, abstractmethod
@@ -21,6 +22,20 @@ class ProviderDecision:
     decision: BrowserActionDecision
     usage: dict[str, Any] | None = None
     raw_text: str | None = None
+
+
+@dataclass
+class ProviderAPIError(RuntimeError):
+    provider: ProviderName
+    message: str
+    status_code: int | None = None
+    retryable: bool = False
+    raw_error: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        if self.status_code is None:
+            return f"{self.provider} provider error: {self.message}"
+        return f"{self.provider} provider error ({self.status_code}): {self.message}"
 
 
 class BaseProviderAdapter(ABC):
@@ -83,10 +98,42 @@ class BaseProviderAdapter(ABC):
         payload: dict[str, Any],
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        max_attempts = max(1, self.settings.model_max_retries + 1)
         async with httpx.AsyncClient(timeout=timeout or self.settings.model_request_timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            return response.json()
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
+                        continue
+                    raise ProviderAPIError(
+                        provider=self.provider,
+                        message=str(exc),
+                        status_code=None,
+                        retryable=True,
+                    ) from exc
+
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
+                        continue
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    payload = self._safe_json(response)
+                    raise ProviderAPIError(
+                        provider=self.provider,
+                        message=self._extract_error_message(payload) or response.text[:300],
+                        status_code=response.status_code,
+                        retryable=response.status_code == 429 or response.status_code >= 500,
+                        raw_error=payload if isinstance(payload, dict) else None,
+                    ) from exc
+
+                return response.json()
+
+        raise ProviderAPIError(provider=self.provider, message="request failed without a response")
 
     @staticmethod
     def encode_image(path: str) -> tuple[str, str]:
@@ -140,6 +187,11 @@ class BaseProviderAdapter(ABC):
             "- Use only the current observation. element_id values are observation-scoped.\n"
             "- Prefer element_id over selector. Use coordinates only for click when no reliable locator exists.\n"
             "- Never invent URLs, elements, or file paths.\n"
+            "- Always set risk_category. Use read for navigate/scroll/done, write for normal click/type/press, upload for file uploads.\n"
+            "- If an action would post/send/publish content, set risk_category=post.\n"
+            "- If an action would submit a payment/order, set risk_category=payment.\n"
+            "- If an action would change profile/settings/security/billing/account state, set risk_category=account_change.\n"
+            "- If an action would delete/remove/cancel/close something, set risk_category=destructive.\n"
             "- If the goal is already complete, return action=done.\n"
             "- If the next step involves login, MFA, CAPTCHA, payments, sending/posting, or you are uncertain, return action=request_human_takeover.\n"
             "- For upload, use only an explicitly provided staged file_path.\n"
@@ -152,3 +204,31 @@ class BaseProviderAdapter(ABC):
     @property
     def action_schema(self) -> dict[str, Any]:
         return BROWSER_ACTION_SCHEMA
+
+    @staticmethod
+    def _safe_json(response: httpx.Response) -> dict[str, Any] | None:
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _extract_error_message(payload: dict[str, Any] | None) -> str | None:
+        if not payload:
+            return None
+        error = payload.get("error")
+        if isinstance(error, dict):
+            parts = [
+                error.get("message"),
+                error.get("type"),
+                error.get("status"),
+                error.get("code"),
+            ]
+            text = " | ".join(str(part) for part in parts if part)
+            if text:
+                return text
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+        return None

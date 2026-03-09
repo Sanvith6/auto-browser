@@ -42,7 +42,17 @@ Open:
 - API docs: `http://localhost:8000/docs`
 - Visual takeover: `http://localhost:6080/vnc.html?autoconnect=true&resize=scale`
 
-All published ports bind to `127.0.0.1` by default. For remote access, put the stack behind Tailscale or another authenticated tunnel and update `TAKEOVER_URL`.
+All published ports bind to `127.0.0.1` by default.
+
+If you want the controller API itself protected, set `API_BEARER_TOKEN` and send:
+
+```bash
+Authorization: Bearer <token>
+```
+
+For remote access, you now have two sane paths:
+- put the stack behind **Tailscale / Cloudflare Access**
+- run the optional **reverse-SSH sidecar** and point `TAKEOVER_URL` at the forwarded noVNC URL
 
 If `8000`, `6080`, or `5900` are already taken on the host, override them inline:
 
@@ -52,11 +62,77 @@ TAKEOVER_URL='http://127.0.0.1:6081/vnc.html?autoconnect=true&resize=scale' \
 docker compose up --build
 ```
 
+### Reverse SSH remote access
+
+This repo now includes an optional `reverse-ssh` profile that forwards:
+- controller API `8000` -> remote port `REVERSE_SSH_REMOTE_API_PORT`
+- noVNC `6080` -> remote port `REVERSE_SSH_REMOTE_NOVNC_PORT`
+
+Setup:
+
+```bash
+mkdir -p data/ssh data/tunnels
+chmod 700 data/ssh
+cp ~/.ssh/id_ed25519 data/ssh/id_ed25519
+chmod 600 data/ssh/id_ed25519
+ssh-keyscan -p 22 bastion.example.com > data/ssh/known_hosts
+```
+
+Then set these in `.env`:
+
+```bash
+REVERSE_SSH_HOST=bastion.example.com
+REVERSE_SSH_USER=browserbot
+REVERSE_SSH_PORT=22
+REVERSE_SSH_REMOTE_BIND_ADDRESS=127.0.0.1
+REVERSE_SSH_REMOTE_API_PORT=18000
+REVERSE_SSH_REMOTE_NOVNC_PORT=16080
+REVERSE_SSH_ACCESS_MODE=private
+TAKEOVER_URL=http://bastion.example.com:16080/vnc.html?autoconnect=true&resize=scale
+```
+
+Start it:
+
+```bash
+docker compose --profile reverse-ssh up --build
+```
+
+Notes:
+- default remote bind is `127.0.0.1` on the SSH server. That is safer.
+- the sidecar refuses non-local reverse binds unless `REVERSE_SSH_ALLOW_NONLOCAL_BIND=true`.
+- `REVERSE_SSH_ACCESS_MODE=private` is the default. That means bastion-only unless you front it with Tailscale or Cloudflare Access.
+- `REVERSE_SSH_ACCESS_MODE=cloudflare-access` expects `REVERSE_SSH_PUBLIC_SCHEME=https`.
+- non-local reverse binds are only allowed in `REVERSE_SSH_ACCESS_MODE=unsafe-public`. That is intentionally loud because `GatewayPorts` exposure is easy to get wrong.
+- the sidecar writes connection metadata to `data/tunnels/reverse-ssh.json`.
+- the sidecar refreshes that metadata on a heartbeat, and the controller marks stale tunnel metadata as inactive.
+
+### Run the local reverse-SSH smoke test
+
+This repo includes a self-contained smoke harness with a disposable SSH bastion container:
+
+```bash
+./scripts/smoke_reverse_ssh.sh
+```
+
+It verifies:
+- controller `/remote-access`
+- forwarded API through the bastion
+- forwarded noVNC through the bastion
+- session create + observe through the forwarded API
+
 ### Check configured model providers
 
 ```bash
 curl -s http://localhost:8000/agent/providers | jq
 ```
+
+### Inspect active remote-access metadata
+
+```bash
+curl -s http://localhost:8000/remote-access | jq
+```
+
+If the reverse-SSH sidecar is running, observations and session summaries will automatically return the forwarded `takeover_url` from `data/tunnels/reverse-ssh.json`.
 
 ### Create a session
 
@@ -78,7 +154,8 @@ The response includes:
 - a screenshot path and artifact URL
 - interactable elements with observation-scoped `element_id` values
 - recent console errors
-- the noVNC takeover URL
+- the effective noVNC takeover URL
+- remote-access metadata when a tunnel sidecar is active
 
 ### Click by `element_id`
 
@@ -115,7 +192,33 @@ This POC expects upload files to be staged on disk first:
 cp ~/Downloads/example.pdf data/uploads/
 ```
 
-Then call the upload action with `approved=true`.
+Then request and execute approval through the queue:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/actions/upload \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"selector":"input[type=file]","file_path":"example.pdf"}' | jq
+```
+
+That returns `409` with a pending approval payload. Then:
+
+```bash
+curl -s http://localhost:8000/approvals/<approval-id>/approve \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"comment":"approved"}' | jq
+
+curl -s http://localhost:8000/approvals/<approval-id>/execute \
+  -X POST | jq
+```
+
+### Inspect approvals
+
+```bash
+curl -s http://localhost:8000/approvals | jq
+curl -s http://localhost:8000/approvals/<approval-id> | jq
+```
 
 ### Ask a provider for one next step
 
@@ -143,6 +246,8 @@ curl -s http://localhost:8000/sessions/<session-id>/agent/run \
   }' | jq
 ```
 
+If a model proposes an upload, post/send, payment, account change, or destructive step, the run now stops with `status=approval_required` and writes a queued approval item instead of executing the side effect.
+
 ## Project layout
 
 ```text
@@ -150,6 +255,7 @@ browser-operator-poc/
 ├── browser-node/        # headed Chromium + noVNC image
 ├── controller/          # FastAPI + Playwright control plane
 ├── data/                # artifacts, uploads, auth state, profile data
+├── reverse-ssh/         # optional autossh sidecar for private remote access
 ├── docker-compose.yml
 └── docs/
     ├── architecture.md
@@ -167,12 +273,12 @@ browser-operator-poc/
 
 ## Production upgrades after the POC
 
-- replace raw local ports with **Tailscale** or Cloudflare Access
+- replace raw local ports with **Tailscale**, Cloudflare Access, or a hardened bastion
 - move session metadata into Redis/Postgres
 - run **one browser pod per account**
 - switch from CDP to **Playwright `launchServer` / `connect`** for higher fidelity
-- add policy enforcement for posting, payments, and sensitive domains
-- add a real approval queue with human sign-off
+- persist approvals in a database instead of flat files when the POC grows
+- add per-operator identity / SSO on top of the approval queue
 
 ## References
 
@@ -192,3 +298,7 @@ Set one or more of these before starting the stack:
 - `GEMINI_API_KEY` + optional `GEMINI_MODEL`
 
 The controller exposes provider readiness at `GET /agent/providers`.
+
+Optional provider resilience knobs:
+- `MODEL_MAX_RETRIES`
+- `MODEL_RETRY_BACKOFF_SECONDS`

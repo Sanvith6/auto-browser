@@ -14,6 +14,15 @@ Every provider adapter returns the same internal decision schema:
 - `request_human_takeover`
 - `done`
 
+Each decision also carries a `risk_category`:
+- `read`
+- `write`
+- `upload`
+- `post`
+- `payment`
+- `account_change`
+- `destructive`
+
 The LLM does **not** talk to Playwright directly.
 
 ## Current implementation
@@ -31,7 +40,7 @@ The controller now includes:
 1. capture a fresh observation
 2. send screenshot + structured page state to the chosen model
 3. parse a strict structured action
-4. execute that action through the controller
+4. execute that action through the controller, or queue approval if it is sensitive
 5. store artifacts and logs
 
 ## Provider strategy
@@ -85,13 +94,19 @@ The prompt tells all providers to choose `request_human_takeover` for:
 - posting / sending
 - uncertainty
 
-Upload approval still stays in the controller, not the model.
+Approval stays in the controller, not the model.
+
+If a provider still proposes a sensitive side effect, the controller does not trust it blindly:
+- uploads become approval queue items
+- `post`, `payment`, `account_change`, and `destructive` decisions become approval queue items
+- the step/run returns `approval_required`
 
 ## Important limits
 
 - This POC still uses **one visible desktop**, so only one active session is safe.
 - `element_id` values are **observation-scoped**.
 - Provider calls are synchronous HTTP requests in the API process.
+- Provider HTTP calls now retry `429` and `5xx` responses with exponential backoff using `MODEL_MAX_RETRIES` and `MODEL_RETRY_BACKOFF_SECONDS`.
 - Live provider execution depends on `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` being present in the controller container.
 
 ## Next production upgrades

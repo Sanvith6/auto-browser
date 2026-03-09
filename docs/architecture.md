@@ -166,14 +166,15 @@ That lets you swap models without rewriting browser logic.
 
 ## Policy rails
 
-This POC includes two basic rails:
+This POC includes real controller-side rails:
 - **host allowlist** for navigation
-- **explicit upload approval** for file uploads
+- **read vs write action classes** in action logs
+- **approval queue** for uploads
+- **approval queue** for model-declared post / payment / account-change / destructive steps
 
 Production should add more:
 - domain classes: read-only vs write-capable
-- action classes: navigation vs upload vs publish vs purchase
-- human approval for posting, payments, and account changes
+- stronger domain policy by account/workflow
 - per-model scopes and quotas
 
 ## Human takeover
@@ -214,6 +215,8 @@ That is the minimal reliable operator loop.
 
 ### Phase 2 — private remote access
 - put the stack behind Tailscale or Cloudflare Access
+- or use the optional reverse-SSH sidecar in this repo to pinhole only the API + noVNC ports through a bastion
+- keep reverse binds on `127.0.0.1` unless you intentionally opt into `unsafe-public`
 - add TLS and auth at the gateway
 - remove public raw debugging ports
 
@@ -232,7 +235,7 @@ That is the minimal reliable operator loop.
 
 ### Phase 5 — enterprise hardening
 - encrypted auth-state storage
-- action approval workflows
+- approval workflows backed by a database + operator identity
 - audit log export
 - secret rotation
 - SSO and operator identity

@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
     browser_cdp_endpoint: str = Field("http://browser-node:9222", alias="BROWSER_CDP_ENDPOINT")
     browser_cdp_ws_endpoint_file: str = Field(
         "/data/browser-profile/browser-ws-endpoint.txt",
@@ -14,9 +15,18 @@ class Settings(BaseSettings):
         "http://localhost:6080/vnc.html?autoconnect=true&resize=scale",
         alias="TAKEOVER_URL",
     )
+    remote_access_info_path: str = Field(
+        "/data/tunnels/reverse-ssh.json",
+        alias="REMOTE_ACCESS_INFO_PATH",
+    )
+    remote_access_stale_after_seconds: float = Field(
+        45.0,
+        alias="REMOTE_ACCESS_STALE_AFTER_SECONDS",
+    )
     artifact_root: str = Field("/data/artifacts", alias="ARTIFACT_ROOT")
     upload_root: str = Field("/data/uploads", alias="UPLOAD_ROOT")
     auth_root: str = Field("/data/auth", alias="AUTH_ROOT")
+    approval_root: str = Field("/data/approvals", alias="APPROVAL_ROOT")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
     default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")
@@ -45,6 +55,8 @@ class Settings(BaseSettings):
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
 
     model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")
+    model_max_retries: int = Field(2, alias="MODEL_MAX_RETRIES")
+    model_retry_backoff_seconds: float = Field(1.0, alias="MODEL_RETRY_BACKOFF_SECONDS")
 
     model_config = SettingsConfigDict(
         env_file=".env",

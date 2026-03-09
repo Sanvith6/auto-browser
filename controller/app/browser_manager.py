@@ -14,7 +14,9 @@ from uuid import uuid4
 
 from playwright.async_api import Browser, BrowserContext, Error as PlaywrightError, Page, Playwright, async_playwright
 
+from .approvals import ApprovalRequiredError, ApprovalStore
 from .config import Settings
+from .models import ApprovalKind, BrowserActionDecision
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +125,95 @@ class BrowserManager:
         Path(self.settings.artifact_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.upload_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.auth_root).mkdir(parents=True, exist_ok=True)
+        Path(self.settings.approval_root).mkdir(parents=True, exist_ok=True)
+        self.approvals = ApprovalStore(self.settings.approval_root)
+
+    def get_remote_access_info(self) -> dict[str, Any]:
+        info_path = Path(self.settings.remote_access_info_path)
+        payload: dict[str, Any] = {
+            "active": False,
+            "status": "inactive",
+            "stale": False,
+            "source": "static",
+            "configured_takeover_url": self.settings.takeover_url,
+            "takeover_url": self.settings.takeover_url,
+            "api_url": None,
+            "api_auth_enabled": bool(self.settings.api_bearer_token),
+            "info_path": str(info_path),
+            "exists": info_path.exists(),
+            "last_updated": None,
+            "age_seconds": None,
+            "stale_after_seconds": float(self.settings.remote_access_stale_after_seconds),
+            "tunnel": None,
+            "error": None,
+        }
+        if not info_path.exists():
+            return payload
+        try:
+            tunnel = json.loads(info_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("failed to read remote access info %s: %s", info_path, exc)
+            payload["status"] = "error"
+            payload["source"] = "metadata_file"
+            payload["error"] = str(exc)
+            return payload
+
+        last_updated = self._parse_remote_access_timestamp(tunnel.get("updated_at"))
+        if last_updated is None:
+            try:
+                last_updated = datetime.fromtimestamp(info_path.stat().st_mtime, tz=UTC)
+            except OSError:
+                last_updated = None
+        age_seconds = None
+        if last_updated is not None:
+            age_seconds = max(0.0, (datetime.now(UTC) - last_updated).total_seconds())
+        stale_after_seconds = float(
+            tunnel.get("stale_after_seconds") or self.settings.remote_access_stale_after_seconds
+        )
+        raw_status = str(tunnel.get("status") or "active")
+        stale = bool(age_seconds is not None and age_seconds > stale_after_seconds)
+        active = raw_status == "active" and not stale
+        takeover_url = tunnel.get("public_takeover_url") if active else self.settings.takeover_url
+        api_url = tunnel.get("public_api_url") if active else None
+        payload.update(
+            {
+                "active": active,
+                "status": "stale" if stale else raw_status,
+                "stale": stale,
+                "source": "metadata_file",
+                "takeover_url": takeover_url,
+                "api_url": api_url,
+                "last_updated": (
+                    last_updated.isoformat().replace("+00:00", "Z")
+                    if last_updated is not None
+                    else None
+                ),
+                "age_seconds": age_seconds,
+                "stale_after_seconds": stale_after_seconds,
+                "tunnel": tunnel,
+            }
+        )
+        return payload
+
+    def _current_takeover_url(self, session: BrowserSession | None = None) -> str:
+        remote_access = self.get_remote_access_info()
+        if remote_access.get("active") and remote_access.get("takeover_url"):
+            return str(remote_access["takeover_url"])
+        if session is not None:
+            return session.takeover_url
+        return self.settings.takeover_url
+
+    @staticmethod
+    def _parse_remote_access_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     async def startup(self) -> None:
         logger.info("starting browser manager")
@@ -278,6 +369,55 @@ class BrowserManager:
             raise KeyError(session_id)
         return session
 
+    async def list_approvals(
+        self,
+        *,
+        status: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        approvals = await self.approvals.list(status=status, session_id=session_id)
+        return [approval.model_dump() for approval in approvals]
+
+    async def get_approval(self, approval_id: str) -> dict[str, Any]:
+        approval = await self.approvals.get(approval_id)
+        return approval.model_dump()
+
+    async def approve(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
+        approval = await self.approvals.approve(approval_id, comment=comment)
+        return approval.model_dump()
+
+    async def reject(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
+        approval = await self.approvals.reject(approval_id, comment=comment)
+        return approval.model_dump()
+
+    async def execute_approval(self, approval_id: str) -> dict[str, Any]:
+        approval = await self.approvals.get(approval_id)
+        if approval.status != "approved":
+            raise PermissionError(f"approval {approval_id} is not approved")
+
+        decision = approval.action
+        if decision.action == "upload":
+            execution = await self.upload(
+                approval.session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                file_path=decision.file_path or "",
+                approved=False,
+                approval_id=approval.id,
+            )
+            latest = await self.approvals.get(approval.id)
+        else:
+            execution = await self.execute_decision(
+                approval.session_id,
+                decision,
+                approval_id=approval.id,
+            )
+            latest = await self.approvals.get(approval.id)
+        return {
+            "approval": latest.model_dump(),
+            "execution": execution,
+        }
+
     async def observe(self, session_id: str, limit: int = 40) -> dict[str, Any]:
         session = await self.get_session(session_id)
         async with session.lock:
@@ -372,33 +512,100 @@ class BrowserManager:
             operation,
         )
 
+    async def execute_decision(
+        self,
+        session_id: str,
+        decision: BrowserActionDecision,
+        *,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        approval = await self._require_decision_approval(
+            session_id,
+            decision,
+            approval_id=approval_id,
+        )
+
+        if decision.action == "navigate":
+            result = await self.navigate(session_id, decision.url or "")
+        elif decision.action == "click":
+            result = await self.click(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                x=decision.x,
+                y=decision.y,
+            )
+        elif decision.action == "type":
+            result = await self.type(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                text=decision.text or "",
+                clear_first=decision.clear_first,
+            )
+        elif decision.action == "press":
+            result = await self.press(session_id, decision.key or "")
+        elif decision.action == "scroll":
+            result = await self.scroll(session_id, decision.delta_x, decision.delta_y)
+        elif decision.action == "upload":
+            result = await self.upload(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                file_path=decision.file_path or "",
+                approved=False,
+                approval_id=approval_id,
+            )
+            return result
+        else:  # pragma: no cover - guarded by schema
+            raise ValueError(f"Unsupported action: {decision.action}")
+
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
     async def upload(
         self,
         session_id: str,
         *,
         file_path: str,
         approved: bool,
+        approval_id: str | None = None,
         selector: str | None = None,
         element_id: str | None = None,
     ) -> dict[str, Any]:
-        if self.settings.require_approval_for_uploads and not approved:
-            raise PermissionError("upload actions require approved=true in this POC")
+        safe_path = self._safe_upload_path(file_path)
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="upload",
+                reason="Manual upload request",
+                selector=selector,
+                element_id=element_id,
+                file_path=file_path,
+                risk_category="upload",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Upload actions require approval",
+        )
 
         session = await self.get_session(session_id)
         target = self._resolve_target(selector=selector, element_id=element_id)
-        safe_path = self._safe_upload_path(file_path)
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
             await locator.set_input_files(str(safe_path))
             await self._settle(session.page)
 
-        return await self._run_action(
+        result = await self._run_action(
             session,
             "upload",
-            {**target, "file_path": str(safe_path), "approved": approved},
+            {**target, "file_path": str(safe_path), "approved": bool(approval), "approval_id": approval_id},
             operation,
         )
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
 
     async def save_storage_state(self, session_id: str, path: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
@@ -420,7 +627,8 @@ class BrowserManager:
         payload = {
             "session": await self._session_summary(session),
             "reason": reason,
-            "takeover_url": session.takeover_url,
+            "takeover_url": self._current_takeover_url(session),
+            "remote_access": self.get_remote_access_info(),
             "message": "Human takeover requested. Open the noVNC URL to continue visually. In this POC, takeover is global to the single browser desktop.",
         }
         await self._append_jsonl(
@@ -428,6 +636,35 @@ class BrowserManager:
             {"timestamp": self._timestamp(), "action": "request_human_takeover", **payload},
         )
         return payload
+
+    async def _require_decision_approval(
+        self,
+        session_id: str,
+        decision: BrowserActionDecision,
+        *,
+        approval_id: str | None,
+        fallback_reason: str | None = None,
+    ):
+        kind = self._approval_kind_for_decision(decision)
+        if kind is None:
+            return None
+        if approval_id:
+            return await self.approvals.require_approved(
+                approval_id=approval_id,
+                session_id=session_id,
+                kind=kind,
+                action=decision,
+            )
+
+        session = await self.get_session(session_id)
+        approval = await self.approvals.create_or_reuse_pending(
+            session_id=session_id,
+            kind=kind,
+            reason=fallback_reason or decision.reason,
+            action=decision,
+            observation=await self._approval_observation(session),
+        )
+        raise ApprovalRequiredError(approval)
 
     async def close_session(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
@@ -497,6 +734,7 @@ class BrowserManager:
             payload = {
                 "timestamp": self._timestamp(),
                 "action": action_name,
+                "action_class": self._action_class(action_name),
                 "target": target,
                 "before": before,
                 "after": after,
@@ -504,6 +742,7 @@ class BrowserManager:
             await self._append_jsonl(session.artifact_dir / "actions.jsonl", payload)
             return {
                 "action": action_name,
+                "action_class": self._action_class(action_name),
                 "session": await self._session_summary(session),
                 "before": before,
                 "after": after,
@@ -532,7 +771,8 @@ class BrowserManager:
             "console_messages": session.console_messages[-10:],
             "page_errors": session.page_errors[-10:],
             "request_failures": session.request_failures[-10:],
-            "takeover_url": session.takeover_url,
+            "takeover_url": self._current_takeover_url(session),
+            "remote_access": self.get_remote_access_info(),
         }
 
     async def _light_snapshot(self, session: BrowserSession, *, label: str) -> dict[str, Any]:
@@ -561,7 +801,8 @@ class BrowserManager:
             "current_url": session.page.url,
             "title": await session.page.title(),
             "artifact_dir": str(session.artifact_dir),
-            "takeover_url": session.takeover_url,
+            "takeover_url": self._current_takeover_url(session),
+            "remote_access": self.get_remote_access_info(),
             "last_action": session.last_action,
         }
 
@@ -577,6 +818,28 @@ class BrowserManager:
         if parsed.scheme in {"about", "data", "blob", ""}:
             return
         self._assert_url_allowed(url)
+
+    async def _approval_observation(self, session: BrowserSession) -> dict[str, Any]:
+        return {
+            "url": session.page.url,
+            "title": await session.page.title(),
+            "takeover_url": self._current_takeover_url(session),
+            "remote_access": self.get_remote_access_info(),
+            "last_action": session.last_action,
+        }
+
+    def _approval_kind_for_decision(self, decision: BrowserActionDecision) -> ApprovalKind | None:
+        if decision.action == "upload":
+            return "upload" if self.settings.require_approval_for_uploads else None
+        if decision.risk_category in {"post", "payment", "account_change", "destructive"}:
+            return decision.risk_category
+        return None
+
+    @staticmethod
+    def _action_class(action_name: str) -> str:
+        if action_name in {"navigate", "scroll"}:
+            return "read"
+        return "write"
 
     def _assert_url_allowed(self, url: str) -> None:
         host = urlparse(url).hostname
