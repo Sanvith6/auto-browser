@@ -158,7 +158,7 @@ The controller owns:
 - provider adapters and orchestration loops for OpenAI / Claude / Gemini
 - durable background job execution for queued agent step/run requests
 - audit events with operator identity tagging
-- an MCP-shaped browser tool gateway over HTTP
+- an MCP JSON-RPC browser tool gateway with session-aware `/mcp` transport
 - optional SQLite backing for approvals and audit retention
 
 ### Why the controller should be the only thing LLMs talk to
@@ -232,7 +232,7 @@ That is the minimal reliable operator loop.
 - action verification in action logs/responses
 - encrypted auth-state support
 - audit log at `/data/audit/events.jsonl`
-- MCP-shaped `/mcp/tools` + `/mcp/tools/call` surface
+- MCP JSON-RPC `/mcp` transport plus `/mcp/tools` + `/mcp/tools/call` convenience endpoints
 - optional SQLite state DB for approvals + audit queries/retention
 
 ### Phase 2 — private remote access
@@ -251,7 +251,7 @@ That is the minimal reliable operator loop.
 - built-in retry semantics
 - optional OCR / accessibility snapshots
 - route selection between DOM-click and coordinate-click
-- promote the current MCP-shaped HTTP gateway into a full MCP transport server
+- add streaming/SSE on top of the current MCP transport when clients need server-pushed events
 
 ### Phase 5 — enterprise hardening
 - approval workflows backed by a database + operator identity

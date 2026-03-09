@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     operator_id_header: str = Field("X-Operator-Id", alias="OPERATOR_ID_HEADER")
     operator_name_header: str = Field("X-Operator-Name", alias="OPERATOR_NAME_HEADER")
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
+    mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
     default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")
@@ -92,6 +93,10 @@ class Settings(BaseSettings):
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def mcp_allowed_origin_list(self) -> list[str]:
+        return [item.strip() for item in self.mcp_allowed_origins.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

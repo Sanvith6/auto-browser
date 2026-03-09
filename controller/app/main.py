@@ -12,6 +12,7 @@ from .audit import get_current_operator, reset_current_operator, set_current_ope
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
 from .config import get_settings
+from .mcp_transport import McpHttpTransport
 from .models import (
     ApprovalDecisionRequest,
     AgentRunRequest,
@@ -44,6 +45,13 @@ job_queue = AgentJobQueue(
     audit_store=manager.audit,
 )
 tool_gateway = McpToolGateway(manager=manager, orchestrator=orchestrator, job_queue=job_queue)
+mcp_transport = McpHttpTransport(
+    tool_gateway=tool_gateway,
+    server_name="browser-operator",
+    server_title="Browser Operator MCP",
+    server_version="0.2.0",
+    allowed_origins=settings.mcp_allowed_origin_list,
+)
 
 
 @asynccontextmanager
@@ -433,6 +441,21 @@ async def enqueue_agent_run(session_id: str, payload: AgentRunRequest) -> dict:
         return await job_queue.enqueue_run(session_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.get("/mcp")
+async def get_mcp_transport(request: Request):
+    return await mcp_transport.handle_get_request(request)
+
+
+@app.post("/mcp")
+async def post_mcp_transport(request: Request):
+    return await mcp_transport.handle_post_request(request)
+
+
+@app.delete("/mcp")
+async def delete_mcp_transport(request: Request):
+    return await mcp_transport.handle_delete_request(request)
 
 
 @app.get("/mcp/tools")

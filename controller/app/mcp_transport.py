@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid4
+
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
+
+from .models import McpToolCallRequest
+
+JSONRPC_VERSION = "2.0"
+MCP_SESSION_HEADER = "MCP-Session-Id"
+LEGACY_MCP_SESSION_HEADER = "Mcp-Session-Id"
+MCP_PROTOCOL_HEADER = "MCP-Protocol-Version"
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+)
+CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+INITIALIZATION_REQUIRED_ERROR = -32002
+
+
+@dataclass
+class McpSession:
+    id: str
+    protocol_version: str
+    client_info: dict[str, Any]
+    client_capabilities: dict[str, Any]
+    initialized: bool = False
+
+
+class McpHttpTransport:
+    def __init__(
+        self,
+        *,
+        tool_gateway,
+        server_name: str,
+        server_version: str,
+        server_title: str | None = None,
+        allowed_origins: list[str] | None = None,
+    ):
+        self.tool_gateway = tool_gateway
+        self.server_name = server_name
+        self.server_version = server_version
+        self.server_title = server_title or server_name
+        self.allowed_origins = tuple(allowed_origins or [])
+        self._sessions: dict[str, McpSession] = {}
+
+    async def handle_post_request(self, request: Request) -> Response:
+        origin_error = self._validate_origin(request)
+        if origin_error is not None:
+            return origin_error
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._json_error_response(None, -32700, "Invalid JSON payload", status_code=400)
+
+        if isinstance(payload, list):
+            return self._json_error_response(None, -32600, "JSON-RPC batches are not supported", status_code=400)
+        if not isinstance(payload, dict):
+            return self._json_error_response(None, -32600, "JSON-RPC body must be an object", status_code=400)
+        if payload.get("jsonrpc") != JSONRPC_VERSION:
+            return self._json_error_response(
+                payload.get("id"),
+                -32600,
+                "Only JSON-RPC 2.0 is supported",
+                status_code=400,
+            )
+
+        method = payload.get("method")
+        if method is None:
+            return Response(status_code=202)
+        if not isinstance(method, str) or not method:
+            return self._json_error_response(payload.get("id"), -32600, "JSON-RPC method is required", status_code=400)
+
+        if "id" not in payload:
+            return await self._handle_notification(request, payload)
+        return await self._handle_request(request, payload)
+
+    async def handle_get_request(self, request: Request) -> Response:
+        origin_error = self._validate_origin(request)
+        if origin_error is not None:
+            return origin_error
+        return JSONResponse(
+            status_code=405,
+            headers={"Allow": "POST, DELETE"},
+            content={"detail": "This MCP endpoint only supports POST JSON-RPC and DELETE session teardown."},
+        )
+
+    async def handle_delete_request(self, request: Request) -> Response:
+        origin_error = self._validate_origin(request)
+        if origin_error is not None:
+            return origin_error
+
+        session_id = self._read_session_id(request)
+        if not session_id:
+            return self._json_error_response(None, -32000, f"Missing required header: {MCP_SESSION_HEADER}", status_code=400)
+        if self._sessions.pop(session_id, None) is None:
+            return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
+        return Response(status_code=204)
+
+    async def _handle_notification(self, request: Request, payload: dict[str, Any]) -> Response:
+        session = self._require_session(request)
+        if isinstance(session, Response):
+            return session
+
+        protocol_error = self._validate_protocol_header(request, session)
+        if protocol_error is not None:
+            return protocol_error
+
+        method = payload["method"]
+        if method == "notifications/initialized":
+            session.initialized = True
+        return Response(status_code=202)
+
+    async def _handle_request(self, request: Request, payload: dict[str, Any]) -> Response:
+        request_id = payload.get("id")
+        method = payload["method"]
+        params = payload.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return self._json_error_response(request_id, -32602, "JSON-RPC params must be an object")
+
+        if method == "initialize":
+            if self._read_session_id(request):
+                return self._json_error_response(
+                    request_id,
+                    -32600,
+                    "Initialize requests must not include an MCP session header",
+                    status_code=400,
+                )
+            return self._handle_initialize(request_id, params)
+
+        session = self._require_session(request, request_id=request_id)
+        if isinstance(session, Response):
+            return session
+
+        protocol_error = self._validate_protocol_header(request, session, request_id=request_id)
+        if protocol_error is not None:
+            return protocol_error
+
+        if not session.initialized and method != "ping":
+            return self._json_error_response(
+                request_id,
+                INITIALIZATION_REQUIRED_ERROR,
+                "Session not initialized. Send notifications/initialized before calling tools.",
+                headers=self._session_headers(session),
+            )
+
+        if method == "ping":
+            return self._json_result_response(request_id, {}, headers=self._session_headers(session))
+        if method == "tools/list":
+            return self._json_result_response(
+                request_id,
+                {"tools": self.tool_gateway.list_tools()},
+                headers=self._session_headers(session),
+            )
+        if method == "tools/call":
+            try:
+                tool_request = McpToolCallRequest.model_validate(params)
+            except ValidationError as exc:
+                return self._json_error_response(
+                    request_id,
+                    -32602,
+                    "Invalid tools/call params",
+                    data={"errors": exc.errors()},
+                    headers=self._session_headers(session),
+                )
+            tool_response = await self.tool_gateway.call_tool(tool_request)
+            return self._json_result_response(
+                request_id,
+                tool_response.model_dump(exclude_none=True),
+                headers=self._session_headers(session),
+            )
+        return self._json_error_response(
+            request_id,
+            -32601,
+            f"Unknown MCP method: {method}",
+            headers=self._session_headers(session),
+        )
+
+    def _handle_initialize(self, request_id: Any, params: dict[str, Any]) -> Response:
+        requested_version = params.get("protocolVersion")
+        if requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._json_error_response(
+                request_id,
+                -32602,
+                "Unsupported MCP protocol version",
+                data={
+                    "requested": requested_version,
+                    "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                },
+            )
+
+        session = McpSession(
+            id=uuid4().hex,
+            protocol_version=requested_version,
+            client_info=self._coerce_dict(params.get("clientInfo")),
+            client_capabilities=self._coerce_dict(params.get("capabilities")),
+        )
+        self._sessions[session.id] = session
+
+        result = {
+            "protocolVersion": session.protocol_version,
+            "capabilities": {"tools": {}},
+            "serverInfo": {
+                "name": self.server_name,
+                "title": self.server_title,
+                "version": self.server_version,
+            },
+            "instructions": (
+                "Use these tools for supervised browser automation. Sensitive actions may require approvals "
+                "or human takeover before execution."
+            ),
+        }
+        return self._json_result_response(
+            request_id,
+            result,
+            headers={**self._session_headers(session), MCP_SESSION_HEADER: session.id},
+        )
+
+    def _require_session(self, request: Request, *, request_id: Any = None) -> McpSession | Response:
+        session_id = self._read_session_id(request)
+        if not session_id:
+            return self._json_error_response(
+                request_id,
+                -32000,
+                f"Missing required header: {MCP_SESSION_HEADER}",
+                status_code=400,
+            )
+        session = self._sessions.get(session_id)
+        if session is None:
+            return self._json_error_response(
+                request_id,
+                -32001,
+                f"Unknown MCP session: {session_id}",
+                status_code=404,
+            )
+        return session
+
+    def _validate_protocol_header(self, request: Request, session: McpSession, *, request_id: Any = None) -> Response | None:
+        protocol_version = request.headers.get(MCP_PROTOCOL_HEADER)
+        if not protocol_version:
+            return None
+        if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return self._json_error_response(
+                request_id,
+                -32602,
+                "Unsupported MCP protocol version",
+                data={"requested": protocol_version, "supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
+                status_code=400,
+                headers=self._session_headers(session),
+            )
+        if protocol_version != session.protocol_version:
+            return self._json_error_response(
+                request_id,
+                -32600,
+                (
+                    f"Protocol version mismatch for session {session.id}: expected {session.protocol_version}, "
+                    f"got {protocol_version}"
+                ),
+                status_code=400,
+                headers=self._session_headers(session),
+            )
+        return None
+
+    def _validate_origin(self, request: Request) -> Response | None:
+        origin = request.headers.get("origin")
+        if not origin:
+            return None
+
+        normalized_origin = self._normalize_origin(origin)
+        if normalized_origin is None:
+            return self._json_error_response(None, -32000, "Malformed Origin header", status_code=400)
+
+        allowed_origins = {
+            normalized
+            for normalized in (
+                self._normalize_origin(origin_value) for origin_value in self.allowed_origins
+            )
+            if normalized
+        }
+        request_origin = self._normalize_origin(str(request.base_url))
+        if request_origin:
+            allowed_origins.add(request_origin)
+
+        if normalized_origin not in allowed_origins:
+            return self._json_error_response(
+                None,
+                -32000,
+                f"Forbidden Origin header: {origin}",
+                status_code=403,
+            )
+        return None
+
+    @staticmethod
+    def _normalize_origin(value: str) -> str | None:
+        parsed = urlparse(value)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+    @staticmethod
+    def _coerce_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _read_session_id(request: Request) -> str | None:
+        return request.headers.get(MCP_SESSION_HEADER) or request.headers.get(LEGACY_MCP_SESSION_HEADER)
+
+    @staticmethod
+    def _json_result(request_id: Any, result: Any) -> dict[str, Any]:
+        return {
+            "jsonrpc": JSONRPC_VERSION,
+            "id": request_id,
+            "result": result,
+        }
+
+    @staticmethod
+    def _json_error(request_id: Any, code: int, message: str, *, data: Any = None) -> dict[str, Any]:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        return {
+            "jsonrpc": JSONRPC_VERSION,
+            "id": request_id,
+            "error": error,
+        }
+
+    def _json_result_response(
+        self,
+        request_id: Any,
+        result: Any,
+        *,
+        headers: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=status_code, content=self._json_result(request_id, result), headers=headers)
+
+    def _json_error_response(
+        self,
+        request_id: Any,
+        code: int,
+        message: str,
+        *,
+        data: Any = None,
+        headers: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content=self._json_error(request_id, code, message, data=data),
+            headers=headers,
+        )
+
+    @staticmethod
+    def _session_headers(session: McpSession) -> dict[str, str]:
+        return {MCP_PROTOCOL_HEADER: session.protocol_version}

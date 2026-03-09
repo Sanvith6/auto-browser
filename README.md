@@ -18,7 +18,7 @@ This scaffold gives you:
 - provider adapters for **OpenAI, Claude, and Gemini** behind one internal action schema
 - one-step and multi-step **agent orchestration endpoints**
 - a browser-node managed **Playwright server endpoint** so the controller connects over Playwright protocol instead of CDP
-- an **MCP-shaped browser tool gateway** at `/mcp/tools` + `/mcp/tools/call`
+- a **real MCP JSON-RPC transport** at `/mcp`, plus convenience endpoints at `/mcp/tools` + `/mcp/tools/call`
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
 
@@ -333,7 +333,9 @@ Audit events are written to `/data/audit/events.jsonl`.
 
 If `STATE_DB_PATH` is set, approvals and audit events are also stored in SQLite and served from there. `AUDIT_MAX_EVENTS` caps retained audit rows/events in both SQLite and the mirrored JSONL file.
 
-### MCP-shaped browser gateway
+### MCP browser gateway
+
+Convenience endpoints still exist:
 
 ```bash
 curl -s http://localhost:8000/mcp/tools | jq
@@ -347,7 +349,44 @@ curl -s http://localhost:8000/mcp/tools/call \
   }' | jq
 ```
 
-This is not a full MCP transport server yet. It is a clean MCP-shaped HTTP surface that other agents can reuse now.
+The controller now also exposes a real MCP-style JSON-RPC session transport at `/mcp`:
+
+```bash
+INIT=$(curl -si http://localhost:8000/mcp \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"initialize",
+    "params":{
+      "protocolVersion":"2025-11-25",
+      "clientInfo":{"name":"demo-client","version":"0.1.0"},
+      "capabilities":{}
+    }
+  }')
+
+SESSION_ID=$(printf "%s" "$INIT" | awk -F": " '/^MCP-Session-Id:/ {print $2}' | tr -d '\r')
+
+curl -s http://localhost:8000/mcp \
+  -X POST \
+  -H "content-type: application/json" \
+  -H "MCP-Session-Id: $SESSION_ID" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+
+curl -s http://localhost:8000/mcp \
+  -X POST \
+  -H "content-type: application/json" \
+  -H "MCP-Session-Id: $SESSION_ID" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq
+```
+
+Notes:
+- this transport supports `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `DELETE /mcp` session teardown
+- JSON-RPC batching is intentionally rejected
+- if a browser client sends an `Origin` header, set `MCP_ALLOWED_ORIGINS` to the exact allowed origins
 
 ## Project layout
 
@@ -383,7 +422,7 @@ browser-operator-poc/
 - run **one browser pod per account**
 - persist approvals in a database instead of flat files when the POC grows
 - add per-operator identity / SSO on top of the approval queue
-- turn the MCP-shaped gateway into a full MCP transport if you need native tool discovery/streaming
+- add SSE streaming on top of the current MCP JSON-RPC transport if you need server-pushed events
 
 ## References
 
@@ -416,6 +455,7 @@ Optional auth/audit/operator knobs:
 - `AUDIT_ROOT`
 - `STATE_DB_PATH`
 - `AUDIT_MAX_EVENTS`
+- `MCP_ALLOWED_ORIGINS`
 - `AUTH_STATE_ENCRYPTION_KEY`
 - `REQUIRE_AUTH_STATE_ENCRYPTION`
 - `AUTH_STATE_MAX_AGE_HOURS`
