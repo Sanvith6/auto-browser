@@ -9,9 +9,11 @@ This scaffold gives you:
 - **human takeover** through noVNC
 - **artifact capture** for screenshots, traces, and storage state
 - **basic policy rails** with host allowlists and upload approval gates
+- **durable session metadata** under `/data/sessions`, with optional Redis backing
+- **durable agent job records** under `/data/jobs` with background workers for queued step/run requests
 - provider adapters for **OpenAI, Claude, and Gemini** behind one internal action schema
 - one-step and multi-step **agent orchestration endpoints**
-- a browser-node generated **shared ws-endpoint file** so the controller can attach even when Chrome advertises `127.0.0.1` in CDP metadata
+- a browser-node managed **Playwright server endpoint** so the controller connects over Playwright protocol instead of CDP
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
 
@@ -21,7 +23,7 @@ It is intentionally **not** a stealth or anti-bot system. It is for operator-ass
 flowchart LR
     User[Human operator] -->|watch / takeover| noVNC[noVNC]
     LLM[OpenAI / Claude / Gemini] -->|shared tools| Controller[Controller API]
-    Controller -->|CDP + Playwright| Browser[Browser node]
+    Controller -->|Playwright protocol| Browser[Browser node]
     noVNC --> Browser
     Browser --> Artifacts[(screenshots / traces / auth state)]
     Controller --> Artifacts
@@ -156,6 +158,7 @@ The response includes:
 - recent console errors
 - the effective noVNC takeover URL
 - remote-access metadata when a tunnel sidecar is active
+- explicit isolation metadata, including per-session auth/upload roots and the shared-browser-node limit
 
 ### Click by `element_id`
 
@@ -184,12 +187,24 @@ curl -s http://localhost:8000/sessions/<session-id>/storage-state \
   -d '{"path":"demo-auth.json"}' | jq
 ```
 
+That path is now saved under the session’s own auth root:
+
+```text
+/data/auth/<session-id>/demo-auth.json
+```
+
 ### Stage upload files
 
 This POC expects upload files to be staged on disk first:
 
 ```bash
 cp ~/Downloads/example.pdf data/uploads/
+```
+
+For cleaner isolation, you can also stage per-session files under:
+
+```text
+data/uploads/<session-id>/
 ```
 
 Then request and execute approval through the queue:
@@ -248,13 +263,39 @@ curl -s http://localhost:8000/sessions/<session-id>/agent/run \
 
 If a model proposes an upload, post/send, payment, account change, or destructive step, the run now stops with `status=approval_required` and writes a queued approval item instead of executing the side effect.
 
+### Queue agent work for background execution
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/agent/jobs/step \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider":"openai",
+    "goal":"Inspect the page and stop."
+  }' | jq
+
+curl -s http://localhost:8000/sessions/<session-id>/agent/jobs/run \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider":"claude",
+    "goal":"Open the first result and summarize it.",
+    "max_steps":4
+  }' | jq
+
+curl -s http://localhost:8000/agent/jobs | jq
+curl -s http://localhost:8000/agent/jobs/<job-id> | jq
+```
+
+Queued jobs are persisted under `/data/jobs`. If the controller restarts mid-run, any previously `running` jobs are marked `interrupted` on startup instead of disappearing.
+
 ## Project layout
 
 ```text
 browser-operator-poc/
 ├── browser-node/        # headed Chromium + noVNC image
 ├── controller/          # FastAPI + Playwright control plane
-├── data/                # artifacts, uploads, auth state, profile data
+├── data/                # artifacts, uploads, auth state, durable session/job records, profile data
 ├── reverse-ssh/         # optional autossh sidecar for private remote access
 ├── docker-compose.yml
 └── docs/
@@ -270,13 +311,14 @@ browser-operator-poc/
 - Use **one session per account/workflow**.
 - Never automate with your daily browser profile.
 - Keep **one active session per browser node** in this POC because takeover is tied to one visible desktop.
+- Keep a durable session registry even in the POC so restarts downgrade active sessions to **interrupted** instead of losing them.
+- Treat each session’s auth/upload roots as isolated working state even though the visible desktop is still shared.
 
 ## Production upgrades after the POC
 
 - replace raw local ports with **Tailscale**, Cloudflare Access, or a hardened bastion
-- move session metadata into Redis/Postgres
+- move session metadata from file/Redis into a richer Postgres model if you need querying and joins
 - run **one browser pod per account**
-- switch from CDP to **Playwright `launchServer` / `connect`** for higher fidelity
 - persist approvals in a database instead of flat files when the POC grows
 - add per-operator identity / SSO on top of the approval queue
 
@@ -284,8 +326,7 @@ browser-operator-poc/
 
 - OpenAI Computer Use: `https://developers.openai.com/api/docs/guides/tools-computer-use/`
 - Playwright Trace Viewer: `https://playwright.dev/docs/trace-viewer`
-- Playwright BrowserType `connectOverCDP`: `https://playwright.dev/docs/api/class-browsertype`
-- Chrome remote debugging changes: `https://developer.chrome.com/blog/remote-debugging-port`
+- Playwright BrowserType `connect`: `https://playwright.dev/docs/api/class-browsertype`
 - Chrome for Testing: `https://developer.chrome.com/blog/chrome-for-testing`
 - noVNC embedding: `https://novnc.com/noVNC/docs/EMBEDDING.html`
 
@@ -302,3 +343,8 @@ The controller exposes provider readiness at `GET /agent/providers`.
 Optional provider resilience knobs:
 - `MODEL_MAX_RETRIES`
 - `MODEL_RETRY_BACKOFF_SECONDS`
+
+Optional durable session-store knobs:
+- `SESSION_STORE_ROOT`
+- `REDIS_URL`
+- `SESSION_STORE_REDIS_PREFIX`

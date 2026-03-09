@@ -8,15 +8,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
-from urllib.request import urlopen
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from playwright.async_api import Browser, BrowserContext, Error as PlaywrightError, Page, Playwright, async_playwright
 
 from .approvals import ApprovalRequiredError, ApprovalStore
 from .config import Settings
-from .models import ApprovalKind, BrowserActionDecision
+from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionStatus
+from .session_store import DurableSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +105,12 @@ class BrowserSession:
     context: BrowserContext
     page: Page
     artifact_dir: Path
+    auth_dir: Path
+    upload_dir: Path
     takeover_url: str
     trace_path: Path
+    browser_node_name: str = "browser-node"
+    isolation_mode: str = "shared_browser_node"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
@@ -126,7 +130,13 @@ class BrowserManager:
         Path(self.settings.upload_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.auth_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.approval_root).mkdir(parents=True, exist_ok=True)
+        Path(self.settings.session_store_root).mkdir(parents=True, exist_ok=True)
         self.approvals = ApprovalStore(self.settings.approval_root)
+        self.session_store = DurableSessionStore(
+            file_root=self.settings.session_store_root,
+            redis_url=self.settings.redis_url,
+            redis_prefix=self.settings.session_store_redis_prefix,
+        )
 
     def get_remote_access_info(self) -> dict[str, Any]:
         info_path = Path(self.settings.remote_access_info_path)
@@ -217,6 +227,8 @@ class BrowserManager:
 
     async def startup(self) -> None:
         logger.info("starting browser manager")
+        await self.session_store.startup()
+        await self.session_store.mark_all_active_interrupted()
         self.playwright = await async_playwright().start()
         await self.ensure_browser()
 
@@ -229,10 +241,10 @@ class BrowserManager:
             except Exception as exc:  # pragma: no cover - best effort cleanup
                 logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
 
-        if self.browser is not None and self.browser.is_connected():
-            await self.browser.close()
+        self.browser = None
         if self.playwright is not None:
             await self.playwright.stop()
+        await self.session_store.shutdown()
 
     async def ensure_browser(self) -> Browser:
         async with self._browser_lock:
@@ -244,61 +256,48 @@ class BrowserManager:
             last_error: Exception | None = None
             for attempt in range(1, self.settings.connect_retries + 1):
                 try:
-                    cdp_target = await self._resolve_cdp_target(self.settings.browser_cdp_endpoint)
-                    self.browser = await self.playwright.chromium.connect_over_cdp(cdp_target)
-                    logger.info("connected to browser node on attempt %s via %s", attempt, cdp_target)
+                    ws_target = await self._resolve_browser_ws_endpoint()
+                    self.browser = await self.playwright.chromium.connect(ws_target)
+                    logger.info(
+                        "connected to browser node on attempt %s via playwright endpoint %s",
+                        attempt,
+                        ws_target,
+                    )
                     return self.browser
                 except Exception as exc:  # pragma: no cover - depends on external service
                     last_error = exc
                     await asyncio.sleep(self.settings.connect_retry_delay_seconds)
 
+            file_hint = self.settings.browser_ws_endpoint_file
+            direct_hint = self.settings.browser_ws_endpoint or "<not configured>"
             raise RuntimeError(
-                f"Unable to connect to browser node at {self.settings.browser_cdp_endpoint}"
+                "Unable to connect to browser node via Playwright server. "
+                f"Checked ws endpoint file {file_hint} and direct endpoint {direct_hint}."
             ) from last_error
 
-    async def _resolve_cdp_target(self, endpoint: str) -> str:
-        ws_endpoint_file = Path(self.settings.browser_cdp_ws_endpoint_file)
+    async def _resolve_browser_ws_endpoint(self) -> str:
+        ws_endpoint_file = Path(self.settings.browser_ws_endpoint_file)
         if ws_endpoint_file.exists():
             ws_endpoint = ws_endpoint_file.read_text(encoding="utf-8").strip()
             if ws_endpoint:
                 return ws_endpoint
-
-        parsed = urlparse(endpoint)
-        if parsed.scheme not in {"http", "https"}:
-            return endpoint
-
-        version_url = f"{endpoint.rstrip('/')}/json/version"
-
-        def fetch_version() -> dict[str, Any]:
-            with urlopen(version_url, timeout=5) as response:
-                return json.load(response)
-
-        version_info = await asyncio.to_thread(fetch_version)
-        ws_url = version_info.get("webSocketDebuggerUrl")
-        if not ws_url:
-            return endpoint
-
-        ws_parsed = urlparse(ws_url)
-        if ws_parsed.hostname not in {"127.0.0.1", "0.0.0.0", "localhost"}:
-            return ws_url
-
-        host = parsed.hostname or ws_parsed.hostname or "127.0.0.1"
-        port = parsed.port or ws_parsed.port
-        netloc = f"{host}:{port}" if port else host
-        scheme = "wss" if parsed.scheme == "https" else "ws"
-        return urlunparse(
-            (
-                scheme,
-                netloc,
-                ws_parsed.path,
-                ws_parsed.params,
-                ws_parsed.query,
-                ws_parsed.fragment,
-            )
-        )
+        if self.settings.browser_ws_endpoint:
+            return self.settings.browser_ws_endpoint
+        raise FileNotFoundError(f"missing playwright ws endpoint file: {ws_endpoint_file}")
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return [await self._session_summary(session) for session in self.sessions.values()]
+        session_map = {
+            record.id: record.model_dump()
+            for record in await self.session_store.list()
+        }
+        for session in self.sessions.values():
+            summary = await self._session_summary(session)
+            session_map[summary["id"]] = summary
+        return sorted(
+            session_map.values(),
+            key=lambda item: (item.get("created_at") or "", item.get("id") or ""),
+            reverse=True,
+        )
 
     async def create_session(
         self,
@@ -310,15 +309,21 @@ class BrowserManager:
         if start_url:
             self._assert_url_allowed(start_url)
         if len(self.sessions) >= self.settings.max_sessions:
+            active_ids = ", ".join(sorted(self.sessions.keys()))
             raise RuntimeError(
                 f"POC limit reached: max_sessions={self.settings.max_sessions}. "
-                "This scaffold uses one visible desktop, so keep one active session per browser node."
+                f"Active live session(s): {active_ids}. "
+                "This scaffold uses one visible desktop and one shared browser node, so only one live isolated workflow is allowed at a time."
             )
 
         browser = await self.ensure_browser()
         session_id = uuid4().hex[:12]
         artifact_dir = Path(self.settings.artifact_root) / session_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        auth_dir = self._session_auth_root(session_id)
+        upload_dir = self._session_upload_root(session_id)
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
 
         context_kwargs: dict[str, Any] = {
             "viewport": {
@@ -346,6 +351,8 @@ class BrowserManager:
                 context=context,
                 page=page,
                 artifact_dir=artifact_dir,
+                auth_dir=auth_dir,
+                upload_dir=upload_dir,
                 takeover_url=self.settings.takeover_url,
                 trace_path=artifact_dir / "trace.zip",
             )
@@ -356,6 +363,7 @@ class BrowserManager:
                 await page.goto(start_url, wait_until="domcontentloaded")
                 await self._settle(page)
 
+            await self._persist_session(session, status="active")
             return await self._session_summary(session)
         except Exception:
             self.sessions.pop(session_id, None)
@@ -368,6 +376,13 @@ class BrowserManager:
         if session is None:
             raise KeyError(session_id)
         return session
+
+    async def get_session_record(self, session_id: str) -> dict[str, Any]:
+        session = self.sessions.get(session_id)
+        if session is not None:
+            return await self._session_summary(session)
+        record = await self.session_store.get(session_id)
+        return record.model_dump()
 
     async def list_approvals(
         self,
@@ -574,7 +589,8 @@ class BrowserManager:
         selector: str | None = None,
         element_id: str | None = None,
     ) -> dict[str, Any]:
-        safe_path = self._safe_upload_path(file_path)
+        session = await self.get_session(session_id)
+        safe_path = self._safe_upload_path(file_path, session=session)
         approval = await self._require_decision_approval(
             session_id,
             BrowserActionDecision(
@@ -589,7 +605,6 @@ class BrowserManager:
             fallback_reason="Upload actions require approval",
         )
 
-        session = await self.get_session(session_id)
         target = self._resolve_target(selector=selector, element_id=element_id)
 
         async def operation() -> None:
@@ -609,7 +624,7 @@ class BrowserManager:
 
     async def save_storage_state(self, session_id: str, path: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
-        safe_path = self._safe_auth_path(path)
+        safe_path = self._safe_session_auth_path(session, path)
         async with session.lock:
             await session.context.storage_state(path=str(safe_path))
             payload = {
@@ -620,6 +635,7 @@ class BrowserManager:
                 session.artifact_dir / "actions.jsonl",
                 {"timestamp": self._timestamp(), "action": "save_storage_state", **payload},
             )
+            await self._persist_session(session, status="active")
             return payload
 
     async def request_human_takeover(self, session_id: str, reason: str) -> dict[str, Any]:
@@ -635,6 +651,7 @@ class BrowserManager:
             session.artifact_dir / "actions.jsonl",
             {"timestamp": self._timestamp(), "action": "request_human_takeover", **payload},
         )
+        await self._persist_session(session, status="active")
         return payload
 
     async def _require_decision_approval(
@@ -669,13 +686,14 @@ class BrowserManager:
     async def close_session(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
         async with session.lock:
-            summary = await self._session_summary(session)
+            summary = await self._session_summary(session, status="closed", live=False)
             if self.settings.enable_tracing:
                 try:
                     await session.context.tracing.stop(path=str(session.trace_path))
                 except Exception as exc:  # pragma: no cover - depends on external browser support
                     logger.warning("failed to stop tracing for session %s: %s", session_id, exc)
             await session.context.close()
+            await self.session_store.upsert(SessionRecord.model_validate(summary))
             self.sessions.pop(session_id, None)
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
 
@@ -740,6 +758,7 @@ class BrowserManager:
                 "after": after,
             }
             await self._append_jsonl(session.artifact_dir / "actions.jsonl", payload)
+            await self._persist_session(session, status="active")
             return {
                 "action": action_name,
                 "action_class": self._action_class(action_name),
@@ -793,18 +812,37 @@ class BrowserManager:
         await session.page.screenshot(path=str(path), full_page=False)
         return {"path": str(path), "url": f"/artifacts/{session.id}/{filename}"}
 
-    async def _session_summary(self, session: BrowserSession) -> dict[str, Any]:
+    async def _session_summary(
+        self,
+        session: BrowserSession,
+        *,
+        status: SessionStatus = "active",
+        live: bool = True,
+    ) -> dict[str, Any]:
         return {
             "id": session.id,
             "name": session.name,
             "created_at": session.created_at.isoformat(),
+            "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "status": status,
+            "live": live,
             "current_url": session.page.url,
             "title": await session.page.title(),
             "artifact_dir": str(session.artifact_dir),
             "takeover_url": self._current_takeover_url(session),
             "remote_access": self.get_remote_access_info(),
+            "isolation": self._session_isolation(session),
             "last_action": session.last_action,
+            "trace_path": str(session.trace_path),
         }
+
+    async def _persist_session(self, session: BrowserSession, *, status: SessionStatus) -> None:
+        summary = await self._session_summary(
+            session,
+            status=status,
+            live=status == "active",
+        )
+        await self.session_store.upsert(SessionRecord.model_validate(summary))
 
     async def _settle(self, page: Page) -> None:
         try:
@@ -819,12 +857,41 @@ class BrowserManager:
             return
         self._assert_url_allowed(url)
 
+    @staticmethod
+    def _session_auth_root_for(base_root: str, session_id: str) -> Path:
+        return Path(base_root).resolve() / session_id
+
+    @staticmethod
+    def _session_upload_root_for(base_root: str, session_id: str) -> Path:
+        return Path(base_root).resolve() / session_id
+
+    def _session_auth_root(self, session_id: str) -> Path:
+        return self._session_auth_root_for(self.settings.auth_root, session_id)
+
+    def _session_upload_root(self, session_id: str) -> Path:
+        return self._session_upload_root_for(self.settings.upload_root, session_id)
+
+    def _session_isolation(self, session: BrowserSession) -> dict[str, Any]:
+        return {
+            "mode": session.isolation_mode,
+            "browser_node": session.browser_node_name,
+            "shared_takeover_surface": True,
+            "shared_browser_process": True,
+            "max_live_sessions_per_browser_node": 1,
+            "state_roots": {
+                "artifact_dir": str(session.artifact_dir),
+                "auth_dir": str(session.auth_dir),
+                "upload_dir": str(session.upload_dir),
+            },
+        }
+
     async def _approval_observation(self, session: BrowserSession) -> dict[str, Any]:
         return {
             "url": session.page.url,
             "title": await session.page.title(),
             "takeover_url": self._current_takeover_url(session),
             "remote_access": self.get_remote_access_info(),
+            "isolation": self._session_isolation(session),
             "last_action": session.last_action,
         }
 
@@ -874,12 +941,48 @@ class BrowserManager:
             return {"mode": "coordinates", "x": x, "y": y}
         raise ValueError("Provide selector, element_id, or x+y coordinates")
 
-    def _safe_upload_path(self, file_path: str) -> Path:
+    def _safe_upload_path(self, file_path: str, *, session: BrowserSession | None = None) -> Path:
         root = Path(self.settings.upload_root).resolve()
-        candidate = (root / file_path).resolve() if not Path(file_path).is_absolute() else Path(file_path).resolve()
-        if root not in candidate.parents and candidate != root:
+        raw_path = Path(file_path)
+        if raw_path.is_absolute():
+            candidate = raw_path.resolve()
+            allowed_roots = [root]
+            if session is not None:
+                allowed_roots.append(session.upload_dir.resolve())
+        else:
+            allowed_roots = [root]
+            preferred_roots: list[Path] = []
+            if session is not None:
+                preferred_roots.append(session.upload_dir.resolve())
+                allowed_roots.append(session.upload_dir.resolve())
+            preferred_roots.append(root)
+
+            for candidate_root in preferred_roots:
+                candidate = (candidate_root / file_path).resolve()
+                if candidate.exists():
+                    break
+            else:
+                candidate = (preferred_roots[0] / file_path).resolve()
+
+        if not any(candidate == allowed_root or allowed_root in candidate.parents for allowed_root in allowed_roots):
             raise PermissionError("file_path must stay inside upload root")
         if not candidate.exists():
+            raise FileNotFoundError(candidate)
+        return candidate
+
+    def _safe_session_auth_path(
+        self,
+        session: BrowserSession,
+        relative_path: str,
+        *,
+        must_exist: bool = False,
+    ) -> Path:
+        root = session.auth_dir.resolve()
+        candidate = (root / relative_path).resolve()
+        if root not in candidate.parents and candidate != root:
+            raise PermissionError("auth path must stay inside the session auth root")
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        if must_exist and not candidate.exists():
             raise FileNotFoundError(candidate)
         return candidate
 

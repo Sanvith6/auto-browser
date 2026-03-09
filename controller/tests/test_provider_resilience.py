@@ -56,6 +56,7 @@ class ProviderResilienceTests(unittest.IsolatedAsyncioTestCase):
         settings.upload_root = str(root / "uploads")
         settings.auth_root = str(root / "auth")
         settings.approval_root = str(root / "approvals")
+        settings.session_store_root = str(root / "sessions")
         settings.model_max_retries = 1
         settings.model_retry_backoff_seconds = 0
         self.adapter = DummyAdapter(settings)

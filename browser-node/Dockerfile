@@ -18,20 +18,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libxcomposite1 \
     libxkbcommon0 \
+    nodejs \
     novnc \
+    npm \
     procps \
-    socat \
     websockify \
     x11vnc \
     xvfb \
   && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir playwright==1.52.0 \
-  && playwright install chromium
+WORKDIR /opt/browser-node
+
+COPY package.json ./
+RUN npm install --no-audit --no-fund \
+  && npx playwright install chromium
 
 COPY entrypoint.sh /entrypoint.sh
+COPY server.mjs /opt/browser-node/server.mjs
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 5900 6080 9222 9223
+EXPOSE 5900 6080 9223
 
 CMD ["/entrypoint.sh"]

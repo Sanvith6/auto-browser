@@ -29,6 +29,7 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
         self.settings.upload_root = str(root / "uploads")
         self.settings.auth_root = str(root / "auth")
         self.settings.approval_root = str(root / "approvals")
+        self.settings.session_store_root = str(root / "sessions")
         self.manager = BrowserManager(self.settings)
 
         artifact_dir = Path(self.settings.artifact_root) / "session-1"
@@ -40,9 +41,13 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
             context=object(),  # type: ignore[arg-type]
             page=FakePage(),  # type: ignore[arg-type]
             artifact_dir=artifact_dir,
+            auth_dir=Path(self.settings.auth_root) / "session-1",
+            upload_dir=Path(self.settings.upload_root) / "session-1",
             takeover_url="http://127.0.0.1:6080/vnc.html",
             trace_path=artifact_dir / "trace.zip",
         )
+        self.session.auth_dir.mkdir(parents=True, exist_ok=True)
+        self.session.upload_dir.mkdir(parents=True, exist_ok=True)
         self.manager.sessions[self.session.id] = self.session
 
     async def asyncTearDown(self) -> None:

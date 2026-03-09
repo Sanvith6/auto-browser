@@ -52,6 +52,7 @@ class RemoteAccessInfoTests(unittest.TestCase):
         self.settings.upload_root = str(root / "uploads")
         self.settings.auth_root = str(root / "auth")
         self.settings.approval_root = str(root / "approvals")
+        self.settings.session_store_root = str(root / "sessions")
         self.settings.takeover_url = "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale"
         self.settings.remote_access_info_path = str(self.info_path)
         self.settings.remote_access_stale_after_seconds = 30
@@ -133,6 +134,7 @@ class RemoteAccessPropagationTests(unittest.IsolatedAsyncioTestCase):
         self.settings.upload_root = str(root / "uploads")
         self.settings.auth_root = str(root / "auth")
         self.settings.approval_root = str(root / "approvals")
+        self.settings.session_store_root = str(root / "sessions")
         self.settings.takeover_url = "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale"
         self.settings.remote_access_info_path = str(self.info_path)
         self.settings.remote_access_stale_after_seconds = 30
@@ -159,9 +161,13 @@ class RemoteAccessPropagationTests(unittest.IsolatedAsyncioTestCase):
             context=object(),  # type: ignore[arg-type]
             page=FakePage(),  # type: ignore[arg-type]
             artifact_dir=artifact_dir,
+            auth_dir=Path(self.settings.auth_root) / "session-1",
+            upload_dir=Path(self.settings.upload_root) / "session-1",
             takeover_url="http://internal-only:6080/vnc.html",
             trace_path=artifact_dir / "trace.zip",
         )
+        self.session.auth_dir.mkdir(parents=True, exist_ok=True)
+        self.session.upload_dir.mkdir(parents=True, exist_ok=True)
         self.manager.sessions[self.session.id] = self.session
         self.manager._capture_screenshot = AsyncMock(
             return_value={"path": "/tmp/test.png", "url": "/artifacts/session-1/test.png"}

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .agent_jobs import AgentJobQueue
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
 from .config import get_settings
@@ -33,14 +34,21 @@ settings = get_settings()
 manager = BrowserManager(settings)
 providers = ProviderRegistry(settings)
 orchestrator = BrowserOrchestrator(manager, providers)
+job_queue = AgentJobQueue(
+    orchestrator=orchestrator,
+    store_root=settings.job_store_root,
+    worker_count=settings.agent_job_worker_count,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await manager.startup()
+    await job_queue.startup()
     try:
         yield
     finally:
+        await job_queue.shutdown()
         await manager.shutdown()
 
 
@@ -87,6 +95,19 @@ async def readyz() -> dict[str, str]:
 @app.get("/agent/providers")
 async def list_agent_providers() -> list[dict]:
     return [item.model_dump() for item in orchestrator.list_providers()]
+
+
+@app.get("/agent/jobs")
+async def list_agent_jobs(status: str | None = None, session_id: str | None = None) -> list[dict]:
+    return await job_queue.list_jobs(status=status, session_id=session_id)
+
+
+@app.get("/agent/jobs/{job_id}")
+async def get_agent_job(job_id: str) -> dict:
+    try:
+        return await job_queue.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}") from exc
 
 
 @app.get("/remote-access")
@@ -169,8 +190,7 @@ async def create_session(payload: CreateSessionRequest) -> dict:
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict:
     try:
-        session = await manager.get_session(session_id)
-        return await manager._session_summary(session)
+        return await manager.get_session_record(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 
@@ -321,6 +341,15 @@ async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.post("/sessions/{session_id}/agent/jobs/step", status_code=202)
+async def enqueue_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
+    try:
+        await manager.get_session(session_id)
+        return await job_queue.enqueue_step(session_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
 @app.post("/sessions/{session_id}/agent/run")
 async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict:
     try:
@@ -340,6 +369,15 @@ async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/agent/jobs/run", status_code=202)
+async def enqueue_agent_run(session_id: str, payload: AgentRunRequest) -> dict:
+    try:
+        await manager.get_session(session_id)
+        return await job_queue.enqueue_run(session_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 
 
 @app.delete("/sessions/{session_id}")

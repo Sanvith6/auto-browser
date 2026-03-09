@@ -1,15 +1,18 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
-    browser_cdp_endpoint: str = Field("http://browser-node:9222", alias="BROWSER_CDP_ENDPOINT")
-    browser_cdp_ws_endpoint_file: str = Field(
+    browser_ws_endpoint: str | None = Field(
+        None,
+        validation_alias=AliasChoices("BROWSER_WS_ENDPOINT", "BROWSER_CDP_ENDPOINT"),
+    )
+    browser_ws_endpoint_file: str = Field(
         "/data/browser-profile/browser-ws-endpoint.txt",
-        alias="BROWSER_CDP_WS_ENDPOINT_FILE",
+        validation_alias=AliasChoices("BROWSER_WS_ENDPOINT_FILE", "BROWSER_CDP_WS_ENDPOINT_FILE"),
     )
     takeover_url: str = Field(
         "http://localhost:6080/vnc.html?autoconnect=true&resize=scale",
@@ -27,6 +30,14 @@ class Settings(BaseSettings):
     upload_root: str = Field("/data/uploads", alias="UPLOAD_ROOT")
     auth_root: str = Field("/data/auth", alias="AUTH_ROOT")
     approval_root: str = Field("/data/approvals", alias="APPROVAL_ROOT")
+    session_store_root: str = Field("/data/sessions", alias="SESSION_STORE_ROOT")
+    job_store_root: str = Field("/data/jobs", alias="JOB_STORE_ROOT")
+    redis_url: str | None = Field(None, alias="REDIS_URL")
+    session_store_redis_prefix: str = Field(
+        "browser_operator:sessions",
+        alias="SESSION_STORE_REDIS_PREFIX",
+    )
+    agent_job_worker_count: int = Field(1, alias="AGENT_JOB_WORKER_COUNT")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
     default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")

@@ -7,6 +7,10 @@ data/auth/*
 !data/auth/.gitkeep
 data/approvals/*
 !data/approvals/.gitkeep
+data/jobs/*
+!data/jobs/.gitkeep
+data/sessions/*
+!data/sessions/.gitkeep
 data/ssh/*
 !data/ssh/.gitkeep
 data/browser-profile/*

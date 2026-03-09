@@ -88,6 +88,9 @@ RiskCategory = Literal[
 ]
 ApprovalKind = Literal["upload", "post", "payment", "account_change", "destructive"]
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
+SessionStatus = Literal["active", "closed", "interrupted", "failed"]
+AgentJobKind = Literal["agent_step", "agent_run"]
+AgentJobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
 
 
 class BrowserActionDecision(BaseModel):
@@ -214,6 +217,35 @@ class ApprovalRecord(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
+
+
+class SessionRecord(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    updated_at: str
+    status: SessionStatus
+    live: bool = False
+    current_url: str
+    title: str
+    artifact_dir: str
+    takeover_url: str
+    remote_access: dict[str, Any]
+    isolation: dict[str, Any] = Field(default_factory=dict)
+    last_action: str | None = None
+    trace_path: str | None = None
+
+
+class AgentJobRecord(BaseModel):
+    id: str
+    session_id: str
+    kind: AgentJobKind
+    status: AgentJobStatus
+    created_at: str
+    updated_at: str
+    request: dict[str, Any]
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 BROWSER_ACTION_SCHEMA = BrowserActionDecision.model_json_schema()

@@ -117,6 +117,12 @@ Why:
 
 This scaffold intentionally limits the node to **one active session**. The browser node exposes one X display and one noVNC surface, so human takeover is global to that desktop. In production, move to one browser node per session or per account.
 
+Within that limitation, the controller now still scopes working state per session:
+- per-session artifact directory
+- per-session auth-state root
+- per-session upload staging root
+- durable session metadata with explicit isolation descriptors
+
 ## Browser node
 
 The browser node in this POC is a single container with:
@@ -125,7 +131,7 @@ The browser node in this POC is a single container with:
 - Fluxbox
 - x11vnc
 - noVNC
-- remote debugging exposed on port `9222`
+- a Playwright browser server exposed on port `9223`
 
 This is the visual execution box.
 
@@ -135,7 +141,7 @@ Brave adds extra variability and browser-specific behavior without helping the c
 
 ### Chrome security note
 
-Chrome tightened remote debugging behavior in **March 2025**. Using `--remote-debugging-port` against a normal default profile is no longer the right pattern. Use a dedicated `--user-data-dir`, or better, Chrome for Testing. This POC launches Chromium with a dedicated profile path for that reason.
+Chrome tightened remote debugging behavior in **March 2025**. That is one reason this POC now prefers **Playwright `launchServer` / `connect`** over CDP attach. It keeps the controller on Playwright protocol and avoids leaning on raw remote-debugging ports as the core control path.
 
 ## Controller
 
@@ -148,6 +154,7 @@ The controller owns:
 - auth-state save/restore
 - trace export on close
 - provider adapters and orchestration loops for OpenAI / Claude / Gemini
+- durable background job execution for queued agent step/run requests
 
 ### Why the controller should be the only thing LLMs talk to
 
@@ -210,7 +217,8 @@ That is the minimal reliable operator loop.
 - single browser node
 - single controller
 - noVNC takeover
-- in-memory session registry
+- durable session registry under `/data/sessions` with optional Redis backing
+- durable agent job queue under `/data/jobs`
 - local artifact volume
 
 ### Phase 2 — private remote access
@@ -223,7 +231,6 @@ That is the minimal reliable operator loop.
 ### Phase 3 — multi-session isolation
 - one container or VM per account
 - Redis / Postgres for session registry
-- queue-backed task execution
 - per-session CPU/memory quotas
 
 ### Phase 4 — better model ergonomics
