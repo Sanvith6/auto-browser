@@ -20,6 +20,7 @@ from .config import Settings
 from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionStatus
 from .ocr import OCRExtractor
 from .session_store import DurableSessionStore
+from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,11 @@ class BrowserSession:
     trace_path: Path
     browser_node_name: str = "browser-node"
     isolation_mode: str = "shared_browser_node"
+    browser: Browser | None = None
+    runtime: IsolatedBrowserRuntime | None = None
+    shared_takeover_surface: bool = True
+    shared_browser_process: bool = True
+    max_live_sessions_per_browser_node: int = 1
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
@@ -215,6 +221,7 @@ class BrowserManager:
             max_blocks=self.settings.ocr_max_blocks,
             text_limit=self.settings.ocr_text_limit,
         )
+        self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
 
     def get_remote_access_info(self) -> dict[str, Any]:
         info_path = Path(self.settings.remote_access_info_path)
@@ -284,6 +291,8 @@ class BrowserManager:
         return payload
 
     def _current_takeover_url(self, session: BrowserSession | None = None) -> str:
+        if session is not None and session.isolation_mode == "docker_ephemeral":
+            return session.takeover_url
         remote_access = self.get_remote_access_info()
         if remote_access.get("active") and remote_access.get("takeover_url"):
             return str(remote_access["takeover_url"])
@@ -310,7 +319,9 @@ class BrowserManager:
         await self.session_store.startup()
         await self.session_store.mark_all_active_interrupted()
         self.playwright = await async_playwright().start()
-        await self.ensure_browser()
+        await self.runtime_provisioner.startup()
+        if self.settings.session_isolation_mode == "shared_browser_node":
+            await self.ensure_browser()
 
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
@@ -333,27 +344,35 @@ class BrowserManager:
             if self.playwright is None:
                 raise RuntimeError("Playwright not started")
 
-            last_error: Exception | None = None
-            for attempt in range(1, self.settings.connect_retries + 1):
-                try:
-                    ws_target = await self._resolve_browser_ws_endpoint()
-                    self.browser = await self.playwright.chromium.connect(ws_target)
-                    logger.info(
-                        "connected to browser node on attempt %s via playwright endpoint %s",
-                        attempt,
-                        ws_target,
-                    )
-                    return self.browser
-                except Exception as exc:  # pragma: no cover - depends on external service
-                    last_error = exc
-                    await asyncio.sleep(self.settings.connect_retry_delay_seconds)
+            self.browser = await self._connect_browser(
+                self._resolve_browser_ws_endpoint,
+                failure_context=(
+                    "Unable to connect to browser node via Playwright server. "
+                    f"Checked ws endpoint file {self.settings.browser_ws_endpoint_file} "
+                    f"and direct endpoint {self.settings.browser_ws_endpoint or '<not configured>'}."
+                ),
+            )
+            return self.browser
 
-            file_hint = self.settings.browser_ws_endpoint_file
-            direct_hint = self.settings.browser_ws_endpoint or "<not configured>"
-            raise RuntimeError(
-                "Unable to connect to browser node via Playwright server. "
-                f"Checked ws endpoint file {file_hint} and direct endpoint {direct_hint}."
-            ) from last_error
+    async def _connect_browser(self, ws_target_factory, *, failure_context: str) -> Browser:
+        if self.playwright is None:
+            raise RuntimeError("Playwright not started")
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.settings.connect_retries + 1):
+            try:
+                ws_target = await ws_target_factory()
+                browser = await self.playwright.chromium.connect(ws_target)
+                logger.info(
+                    "connected to browser node on attempt %s via playwright endpoint %s",
+                    attempt,
+                    ws_target,
+                )
+                return browser
+            except Exception as exc:  # pragma: no cover - depends on external service
+                last_error = exc
+                await asyncio.sleep(self.settings.connect_retry_delay_seconds)
+        raise RuntimeError(failure_context) from last_error
 
     async def _resolve_browser_ws_endpoint(self) -> str:
         ws_endpoint_file = Path(self.settings.browser_ws_endpoint_file)
@@ -364,6 +383,24 @@ class BrowserManager:
         if self.settings.browser_ws_endpoint:
             return self.settings.browser_ws_endpoint
         raise FileNotFoundError(f"missing playwright ws endpoint file: {ws_endpoint_file}")
+
+    async def _acquire_session_browser(self, session_id: str) -> tuple[Browser, IsolatedBrowserRuntime | None]:
+        if self.settings.session_isolation_mode != "docker_ephemeral":
+            return await self.ensure_browser(), None
+
+        runtime = await self.runtime_provisioner.provision(session_id)
+        try:
+            browser = await self._connect_browser(
+                lambda: asyncio.sleep(0, result=runtime.ws_endpoint),
+                failure_context=(
+                    "Unable to connect to isolated browser node via Playwright server. "
+                    f"Checked isolated endpoint file {runtime.ws_endpoint_file}."
+                ),
+            )
+            return browser, runtime
+        except Exception:
+            await self.runtime_provisioner.release(runtime)
+            raise
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         session_map = {
@@ -390,13 +427,17 @@ class BrowserManager:
             self._assert_url_allowed(start_url)
         if len(self.sessions) >= self.settings.max_sessions:
             active_ids = ", ".join(sorted(self.sessions.keys()))
-            raise RuntimeError(
-                f"POC limit reached: max_sessions={self.settings.max_sessions}. "
-                f"Active live session(s): {active_ids}. "
-                "This scaffold uses one visible desktop and one shared browser node, so only one live isolated workflow is allowed at a time."
+            message = (
+                f"Session limit reached: max_sessions={self.settings.max_sessions}. "
+                f"Active live session(s): {active_ids}."
             )
+            if self.settings.session_isolation_mode == "shared_browser_node":
+                message += (
+                    " This scaffold uses one visible desktop and one shared browser node by default, "
+                    "so only one live workflow is allowed unless you switch to docker_ephemeral isolation."
+                )
+            raise RuntimeError(message)
 
-        browser = await self.ensure_browser()
         session_id = uuid4().hex[:12]
         artifact_dir = Path(self.settings.artifact_root) / session_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -420,7 +461,10 @@ class BrowserManager:
 
         context: BrowserContext | None = None
         session: BrowserSession | None = None
+        browser: Browser | None = None
+        runtime: IsolatedBrowserRuntime | None = None
         try:
+            browser, runtime = await self._acquire_session_browser(session_id)
             context = await browser.new_context(**context_kwargs)
             if self.settings.enable_tracing:
                 await context.tracing.start(screenshots=True, snapshots=True, sources=False)
@@ -436,8 +480,15 @@ class BrowserManager:
                 artifact_dir=artifact_dir,
                 auth_dir=auth_dir,
                 upload_dir=upload_dir,
-                takeover_url=self.settings.takeover_url,
+                takeover_url=runtime.takeover_url if runtime is not None else self.settings.takeover_url,
                 trace_path=artifact_dir / "trace.zip",
+                browser_node_name=runtime.browser_node_name if runtime is not None else "browser-node",
+                isolation_mode=self.settings.session_isolation_mode,
+                browser=browser,
+                runtime=runtime,
+                shared_takeover_surface=runtime is None,
+                shared_browser_process=runtime is None,
+                max_live_sessions_per_browser_node=1,
                 last_auth_state_path=source_path if storage_state_path else None,
             )
             self._attach_page_listeners(page, session)
@@ -454,13 +505,25 @@ class BrowserManager:
                 status="ok",
                 action="create_session",
                 session_id=session.id,
-                details={"start_url": start_url, "storage_state_path": storage_state_path},
+                details={
+                    "start_url": start_url,
+                    "storage_state_path": storage_state_path,
+                    "isolation_mode": session.isolation_mode,
+                    "browser_node": session.browser_node_name,
+                },
             )
             return summary
         except Exception:
             self.sessions.pop(session_id, None)
             if context is not None:
                 await context.close()
+            if browser is not None and browser is not self.browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if runtime is not None:
+                await self.runtime_provisioner.release(runtime)
             raise
         finally:
             if prepared_auth_state is not None:
@@ -827,7 +890,16 @@ class BrowserManager:
                     await session.context.tracing.stop(path=str(session.trace_path))
                 except Exception as exc:  # pragma: no cover - depends on external browser support
                     logger.warning("failed to stop tracing for session %s: %s", session_id, exc)
-            await session.context.close()
+            try:
+                await session.context.close()
+            finally:
+                if session.browser is not None and session.browser is not self.browser:
+                    try:
+                        await session.browser.close()
+                    except Exception as exc:  # pragma: no cover - best effort isolated cleanup
+                        logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
+                if session.runtime is not None:
+                    await self.runtime_provisioner.release(session.runtime)
             await self.session_store.upsert(SessionRecord.model_validate(summary))
             self.sessions.pop(session_id, None)
             await self.audit.append(
@@ -835,7 +907,11 @@ class BrowserManager:
                 status="ok",
                 action="close_session",
                 session_id=session.id,
-                details={"trace_path": str(session.trace_path)},
+                details={
+                    "trace_path": str(session.trace_path),
+                    "isolation_mode": session.isolation_mode,
+                    "browser_node": session.browser_node_name,
+                },
             )
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
 
@@ -1230,18 +1306,30 @@ class BrowserManager:
         return self._session_upload_root_for(self.settings.upload_root, session_id)
 
     def _session_isolation(self, session: BrowserSession) -> dict[str, Any]:
-        return {
+        payload = {
             "mode": session.isolation_mode,
             "browser_node": session.browser_node_name,
-            "shared_takeover_surface": True,
-            "shared_browser_process": True,
-            "max_live_sessions_per_browser_node": 1,
+            "shared_takeover_surface": session.shared_takeover_surface,
+            "shared_browser_process": session.shared_browser_process,
+            "max_live_sessions_per_browser_node": session.max_live_sessions_per_browser_node,
             "state_roots": {
                 "artifact_dir": str(session.artifact_dir),
                 "auth_dir": str(session.auth_dir),
                 "upload_dir": str(session.upload_dir),
             },
         }
+        if session.runtime is not None:
+            payload["runtime"] = {
+                "container_id": session.runtime.container_id,
+                "container_name": session.runtime.container_name,
+                "network": session.runtime.network_name,
+                "profile_dir": str(session.runtime.profile_dir),
+                "downloads_dir": str(session.runtime.downloads_dir),
+                "ws_endpoint_file": str(session.runtime.ws_endpoint_file),
+                "novnc_port": session.runtime.novnc_port,
+                "vnc_port": session.runtime.vnc_port,
+            }
+        return payload
 
     async def _approval_observation(self, session: BrowserSession) -> dict[str, Any]:
         return {

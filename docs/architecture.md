@@ -123,6 +123,16 @@ Within that limitation, the controller now still scopes working state per sessio
 - per-session upload staging root
 - durable session metadata with explicit isolation descriptors
 
+### Optional docker-ephemeral isolation path
+
+This repo now also includes an optional `docker_ephemeral` session mode:
+- the controller provisions a fresh browser-node container per session
+- each isolated session gets its own Playwright endpoint
+- each isolated session gets its own published noVNC/VNC port pair
+- the shared reverse-SSH metadata is not reused for those takeover URLs
+
+That is the first real path toward true per-account browser isolation without rewriting the controller contract.
+
 ## Browser node
 
 The browser node in this POC is a single container with:
@@ -159,6 +169,7 @@ The controller owns:
 - durable background job execution for queued agent step/run requests
 - audit events with operator identity tagging
 - an MCP JSON-RPC browser tool gateway with session-aware `/mcp` transport
+- optional docker-managed per-session browser containers for true runtime isolation
 - optional SQLite backing for approvals and audit retention
 
 ### Why the controller should be the only thing LLMs talk to
@@ -233,6 +244,7 @@ That is the minimal reliable operator loop.
 - encrypted auth-state support
 - audit log at `/data/audit/events.jsonl`
 - MCP JSON-RPC `/mcp` transport plus `/mcp/tools` + `/mcp/tools/call` convenience endpoints
+- optional `docker_ephemeral` isolated browser containers launched per session
 - optional SQLite state DB for approvals + audit queries/retention
 
 ### Phase 2 — private remote access

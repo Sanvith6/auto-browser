@@ -18,6 +18,7 @@ This scaffold gives you:
 - provider adapters for **OpenAI, Claude, and Gemini** behind one internal action schema
 - one-step and multi-step **agent orchestration endpoints**
 - a browser-node managed **Playwright server endpoint** so the controller connects over Playwright protocol instead of CDP
+- optional **docker-ephemeral per-session browser isolation** with dedicated noVNC ports
 - a **real MCP JSON-RPC transport** at `/mcp`, plus convenience endpoints at `/mcp/tools` + `/mcp/tools/call`
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
@@ -65,6 +66,15 @@ X-Operator-Name: Alice Example
 ```
 
 Set `REQUIRE_OPERATOR_ID=true` if every non-health request must carry an operator ID.
+
+If you want **true per-session browser isolation**, use the compose override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.isolation.yml up --build
+```
+
+That keeps the default shared browser-node available, but new sessions are provisioned as one-off browser containers with their own noVNC ports when `SESSION_ISOLATION_MODE=docker_ephemeral`.
+Raise `MAX_SESSIONS` above `1` if you want multiple isolated sessions live at once.
 
 For remote access, you now have two sane paths:
 - put the stack behind **Tailscale / Cloudflare Access**
@@ -135,6 +145,21 @@ It verifies:
 - forwarded API through the bastion
 - forwarded noVNC through the bastion
 - session create + observe through the forwarded API
+
+### Run the local isolated-session smoke test
+
+This repo also includes a smoke harness for per-session docker isolation:
+
+```bash
+./scripts/smoke_isolated_session.sh
+```
+
+It verifies:
+- controller readiness with the isolation override enabled
+- session create in `docker_ephemeral` mode
+- dedicated per-session noVNC port wiring
+- observe + close flow
+- isolated browser container cleanup after close
 
 ### Check configured model providers
 
@@ -397,6 +422,7 @@ browser-operator-poc/
 ├── data/                # artifacts, uploads, auth state, durable session/job records, profile data
 ├── reverse-ssh/         # optional autossh sidecar for private remote access
 ├── docker-compose.yml
+├── docker-compose.isolation.yml
 └── docs/
     ├── architecture.md
     └── llm-adapters.md
@@ -410,6 +436,7 @@ browser-operator-poc/
 - Use **one session per account/workflow**.
 - Never automate with your daily browser profile.
 - Keep **one active session per browser node** in this POC because takeover is tied to one visible desktop.
+- If you need parallel sessions, switch to `docker_ephemeral` isolation so each live session gets its own browser container and takeover port.
 - Keep a durable session registry even in the POC so restarts downgrade active sessions to **interrupted** instead of losing them.
 - Treat each session’s auth/upload roots as isolated working state even though the visible desktop is still shared.
 - Encrypt auth-state at rest once you move beyond localhost demos.
@@ -419,7 +446,7 @@ browser-operator-poc/
 
 - replace raw local ports with **Tailscale**, Cloudflare Access, or a hardened bastion
 - move session metadata from file/Redis into a richer Postgres model if you need querying and joins
-- run **one browser pod per account**
+- promote the docker-ephemeral path into **one browser pod per account** once you want scheduler-level isolation
 - persist approvals in a database instead of flat files when the POC grows
 - add per-operator identity / SSO on top of the approval queue
 - add SSE streaming on top of the current MCP JSON-RPC transport if you need server-pushed events
@@ -456,6 +483,18 @@ Optional auth/audit/operator knobs:
 - `STATE_DB_PATH`
 - `AUDIT_MAX_EVENTS`
 - `MCP_ALLOWED_ORIGINS`
+- `SESSION_ISOLATION_MODE`
+- `ISOLATED_BROWSER_IMAGE`
+- `ISOLATED_BROWSER_CONTAINER_PREFIX`
+- `ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS`
+- `ISOLATED_BROWSER_KEEP_CONTAINERS`
+- `ISOLATED_BROWSER_BIND_HOST`
+- `ISOLATED_TAKEOVER_HOST`
+- `ISOLATED_TAKEOVER_SCHEME`
+- `ISOLATED_TAKEOVER_PATH`
+- `ISOLATED_BROWSER_NETWORK`
+- `ISOLATED_HOST_DATA_ROOT`
+- `ISOLATED_DOCKER_HOST`
 - `AUTH_STATE_ENCRYPTION_KEY`
 - `REQUIRE_AUTH_STATE_ENCRYPTION`
 - `AUTH_STATE_MAX_AGE_HOURS`

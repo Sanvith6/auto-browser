@@ -52,6 +52,33 @@ class Settings(BaseSettings):
     operator_name_header: str = Field("X-Operator-Name", alias="OPERATOR_NAME_HEADER")
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
+    session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
+    isolated_browser_image: str = Field(
+        "browser-operator-poc-browser-node:latest",
+        alias="ISOLATED_BROWSER_IMAGE",
+    )
+    isolated_browser_container_prefix: str = Field(
+        "browser-session",
+        alias="ISOLATED_BROWSER_CONTAINER_PREFIX",
+    )
+    isolated_browser_wait_timeout_seconds: int = Field(
+        45,
+        alias="ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS",
+    )
+    isolated_browser_keep_containers: bool = Field(
+        False,
+        alias="ISOLATED_BROWSER_KEEP_CONTAINERS",
+    )
+    isolated_browser_bind_host: str = Field("127.0.0.1", alias="ISOLATED_BROWSER_BIND_HOST")
+    isolated_takeover_host: str = Field("127.0.0.1", alias="ISOLATED_TAKEOVER_HOST")
+    isolated_takeover_scheme: str = Field("http", alias="ISOLATED_TAKEOVER_SCHEME")
+    isolated_takeover_path: str = Field(
+        "/vnc.html?autoconnect=true&resize=scale",
+        alias="ISOLATED_TAKEOVER_PATH",
+    )
+    isolated_browser_network: str | None = Field(None, alias="ISOLATED_BROWSER_NETWORK")
+    isolated_host_data_root: str | None = Field(None, alias="ISOLATED_HOST_DATA_ROOT")
+    isolated_docker_host: str | None = Field(None, alias="ISOLATED_DOCKER_HOST")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
     default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")
