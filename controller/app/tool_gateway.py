@@ -17,6 +17,9 @@ from .models import (
     McpToolCallRequest,
     McpToolCallResponse,
     McpToolDescriptor,
+    SocialScrollRequest,
+    SocialScrapeRequest,
+    SocialPostRequest,
 )
 
 
@@ -89,6 +92,20 @@ class QueueAgentStepInput(SessionIdInput):
 
 class QueueAgentRunInput(SessionIdInput):
     request: AgentRunRequest
+
+
+class SocialScrollInput(SessionIdInput):
+    direction: str = "down"
+    screens: int = Field(default=3, ge=1, le=20)
+
+
+class SocialScrapeInput(SessionIdInput):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class SocialPostInput(SessionIdInput):
+    text: str = Field(min_length=1, max_length=5000)
+    image_path: str | None = None
 
 
 @dataclass
@@ -239,6 +256,34 @@ class McpToolGateway:
                     input_model=GetRemoteAccessInput,
                     handler=self._get_remote_access,
                 ),
+                ToolSpec(
+                    name="social.scroll_feed",
+                    description="Smoothly scroll the current page feed up or down by N screens using human-paced motion.",
+                    input_model=SocialScrollInput,
+                    handler=self._social_scroll,
+                ),
+                ToolSpec(
+                    name="social.extract_posts",
+                    description="Scrape visible feed posts from the current page. Returns structured list of {text, links, images, y_position}.",
+                    input_model=SocialScrapeInput,
+                    handler=self._social_extract_posts,
+                ),
+                ToolSpec(
+                    name="social.extract_profile",
+                    description="Extract profile info (username, bio, followers, following, avatar) from the current page.",
+                    input_model=SessionIdInput,
+                    handler=self._social_extract_profile,
+                ),
+                ToolSpec(
+                    name="social.post",
+                    description=(
+                        "Find the text composer on the current page (tweet box, post field, comment box) "
+                        "and type + submit the provided text with human-like delays. "
+                        "Navigate to the platform first, then call this tool."
+                    ),
+                    input_model=SocialPostInput,
+                    handler=self._social_post,
+                ),
             ]
         }
 
@@ -288,6 +333,11 @@ class McpToolGateway:
             name=payload.name,
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
+            request_proxy_server=payload.proxy_server,
+            request_proxy_username=payload.proxy_username,
+            request_proxy_password=payload.proxy_password,
+            user_agent=payload.user_agent,
+            stealth_enabled=payload.stealth,
         )
 
     async def _list_sessions(self, _: EmptyInput) -> list[dict[str, Any]]:
@@ -361,3 +411,19 @@ class McpToolGateway:
             record = await self.manager.get_session_record(payload.session_id)
             return record["remote_access"]
         return self.manager.get_remote_access_info(payload.session_id)
+
+    async def _social_scroll(self, payload: SocialScrollInput) -> dict[str, Any]:
+        return await self.manager.scroll_feed(
+            payload.session_id,
+            direction=payload.direction,
+            screens=payload.screens,
+        )
+
+    async def _social_extract_posts(self, payload: SocialScrapeInput) -> list[dict[str, Any]]:
+        return await self.manager.extract_posts(payload.session_id, limit=payload.limit)
+
+    async def _social_extract_profile(self, payload: SessionIdInput) -> dict[str, Any]:
+        return await self.manager.extract_profile(payload.session_id)
+
+    async def _social_post(self, payload: SocialPostInput) -> dict[str, Any]:
+        return await self.manager.post_content(payload.session_id, text=payload.text)

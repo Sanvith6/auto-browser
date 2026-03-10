@@ -1026,6 +1026,96 @@ class BrowserManager:
 
         return await self._run_action(session, "scroll_feed", {"direction": direction, "screens": screens}, operation)
 
+    # JS that finds the most likely text composer on the page
+    _FIND_COMPOSER_SCRIPT = r"""
+() => {
+  const candidates = [
+    '[data-testid="tweetTextarea_0"]',
+    '[data-testid="tweetTextarea"]',
+    '[aria-label*="post" i][contenteditable]',
+    '[aria-label*="tweet" i][contenteditable]',
+    '[aria-label*="write" i][contenteditable]',
+    '[aria-label*="comment" i][contenteditable]',
+    '[placeholder*="post" i]',
+    '[placeholder*="tweet" i]',
+    '[placeholder*="share" i]',
+    '[placeholder*="what" i]',
+    '[placeholder*="say" i]',
+    'div[contenteditable="true"]',
+    'textarea',
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return sel;
+    }
+  }
+  return null;
+}
+"""
+
+    async def post_content(self, session_id: str, text: str) -> dict[str, Any]:
+        """Find a text composer on the current page and type + submit the post."""
+        session = await self.get_session(session_id)
+
+        composer_sel = await session.page.evaluate(self._FIND_COMPOSER_SCRIPT)
+        if not composer_sel:
+            return {"ok": False, "error": "No composer found on current page", "url": session.page.url}
+
+        # Click composer
+        locator = session.page.locator(composer_sel).first
+        await locator.scroll_into_view_if_needed()
+        await locator.click()
+        await asyncio.sleep(0.2 + random.random() * 0.15)
+
+        # Type with human delays
+        for i, char in enumerate(text):
+            await session.page.keyboard.type(char)
+            delay_ms = random.randint(
+                self.settings.human_typing_min_delay_ms,
+                self.settings.human_typing_max_delay_ms,
+            )
+            if i > 0 and i % random.randint(6, 12) == 0:
+                delay_ms += random.randint(150, 500)
+            await asyncio.sleep(delay_ms / 1000)
+
+        await asyncio.sleep(0.4 + random.random() * 0.3)
+
+        # Find and click the submit button
+        submit_selectors = [
+            '[data-testid="tweetButtonInline"]',
+            '[data-testid="tweetButton"]',
+            'button[type="submit"]',
+            '[aria-label*="post" i][role="button"]',
+            '[aria-label*="tweet" i][role="button"]',
+            '[aria-label*="share" i][role="button"]',
+            'button:has-text("Post")',
+            'button:has-text("Tweet")',
+            'button:has-text("Share")',
+            'button:has-text("Submit")',
+        ]
+        submitted = False
+        for sel in submit_selectors:
+            try:
+                btn = session.page.locator(sel).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click()
+                    submitted = True
+                    break
+            except Exception:
+                continue
+
+        await self._settle(session.page)
+        before = {"url": session.page.url}
+        return {
+            "ok": submitted,
+            "composer_selector": composer_sel,
+            "submitted": submitted,
+            "url": session.page.url,
+            "before": before,
+        }
+
     async def execute_decision(
         self,
         session_id: str,

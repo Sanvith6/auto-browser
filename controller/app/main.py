@@ -571,6 +571,14 @@ async def social_extract_profile(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 
 
+@app.post("/sessions/{session_id}/social/post")
+async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
+    try:
+        return await manager.post_content(session_id, text=payload.text)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
 @app.post("/sessions/{session_id}/storage-state")
 async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict:
     try:
