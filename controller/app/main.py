@@ -29,6 +29,9 @@ from .models import (
     PressRequest,
     SaveStorageStateRequest,
     ScrollRequest,
+    SocialScrollRequest,
+    SocialScrapeRequest,
+    SocialPostRequest,
     TabIndexRequest,
     TypeRequest,
     UploadRequest,
@@ -351,6 +354,11 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             name=payload.name,
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
+            request_proxy_server=payload.proxy_server,
+            request_proxy_username=payload.proxy_username,
+            request_proxy_password=payload.proxy_password,
+            user_agent=payload.user_agent,
+            stealth_enabled=payload.stealth,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -537,6 +545,30 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
         raise HTTPException(status_code=409, detail=exc.payload) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/scroll")
+async def social_scroll_feed(session_id: str, payload: SocialScrollRequest) -> dict:
+    try:
+        return await manager.scroll_feed(session_id, direction=payload.direction, screens=payload.screens)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.get("/sessions/{session_id}/social/posts")
+async def social_extract_posts(session_id: str, limit: int = 20) -> list:
+    try:
+        return await manager.extract_posts(session_id, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.get("/sessions/{session_id}/social/profile")
+async def social_extract_profile(session_id: str) -> dict:
+    try:
+        return await manager.extract_profile(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 
 
 @app.post("/sessions/{session_id}/storage-state")

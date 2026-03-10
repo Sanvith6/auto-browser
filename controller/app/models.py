@@ -9,6 +9,11 @@ class CreateSessionRequest(BaseModel):
     name: str | None = None
     start_url: str | None = None
     storage_state_path: str | None = None
+    proxy_server: str | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
+    user_agent: str | None = None
+    stealth: bool = True
 
 
 class ClickRequest(BaseModel):
@@ -324,6 +329,20 @@ class McpToolCallResponse(BaseModel):
     content: list[McpToolCallContent]
     structuredContent: Any | None = None
     isError: bool = False
+
+
+class SocialScrollRequest(BaseModel):
+    direction: Literal["down", "up"] = "down"
+    screens: int = Field(default=3, ge=1, le=20)
+
+
+class SocialScrapeRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class SocialPostRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
+    image_path: str | None = None
 
 
 BROWSER_ACTION_SCHEMA = BrowserActionDecision.model_json_schema()

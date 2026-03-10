@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import json
 import logging
+import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from .ocr import OCRExtractor
 from .session_store import DurableSessionStore
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
+from .stealth import apply_stealth, EXTRACT_POSTS_SCRIPT, EXTRACT_PROFILE_SCRIPT, SMOOTH_SCROLL_SCRIPT
 
 logger = logging.getLogger(__name__)
 
@@ -525,6 +527,11 @@ class BrowserManager:
         name: str | None = None,
         start_url: str | None = None,
         storage_state_path: str | None = None,
+        request_proxy_server: str | None = None,
+        request_proxy_username: str | None = None,
+        request_proxy_password: str | None = None,
+        user_agent: str | None = None,
+        stealth_enabled: bool = True,
     ) -> dict[str, Any]:
         if start_url:
             self._assert_url_allowed(start_url)
@@ -551,13 +558,28 @@ class BrowserManager:
         upload_dir.mkdir(parents=True, exist_ok=True)
         prepared_auth_state = None
 
+        # Choose proxy: per-session override > default settings
+        proxy_server = request_proxy_server or self.settings.default_proxy_server
+        proxy_username = request_proxy_username or self.settings.default_proxy_username
+        proxy_password = request_proxy_password or self.settings.default_proxy_password
+
+        # Slight viewport randomization to avoid consistent fingerprint
+        vw = self.settings.default_viewport_width + random.randint(-20, 20)
+        vh = self.settings.default_viewport_height + random.randint(-10, 10)
+
         context_kwargs: dict[str, Any] = {
-            "viewport": {
-                "width": self.settings.default_viewport_width,
-                "height": self.settings.default_viewport_height,
-            },
+            "viewport": {"width": vw, "height": vh},
             "accept_downloads": True,
         }
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        if proxy_server:
+            proxy_cfg: dict[str, Any] = {"server": proxy_server}
+            if proxy_username:
+                proxy_cfg["username"] = proxy_username
+            if proxy_password:
+                proxy_cfg["password"] = proxy_password
+            context_kwargs["proxy"] = proxy_cfg
         if storage_state_path:
             source_path = self._safe_auth_path(storage_state_path, must_exist=True)
             prepared_auth_state = self.auth_state.prepare_for_context(source_path)
@@ -575,6 +597,8 @@ class BrowserManager:
 
             page = await context.new_page()
             page.set_default_timeout(self.settings.action_timeout_ms)
+            if stealth_enabled:
+                await apply_stealth(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -841,14 +865,22 @@ class BrowserManager:
             locator = session.page.locator(target["selector"]).first
             await locator.scroll_into_view_if_needed()
             await locator.click()
+            await asyncio.sleep(0.05 + random.random() * 0.1)
             if clear_first:
-                try:
-                    await locator.fill(text)
-                except Exception:
-                    await session.page.keyboard.press("Control+A")
-                    await session.page.keyboard.type(text, delay=self.settings.typing_delay_ms)
-            else:
-                await session.page.keyboard.type(text, delay=self.settings.typing_delay_ms)
+                await session.page.keyboard.press("Control+a")
+                await asyncio.sleep(0.03)
+                await session.page.keyboard.press("Delete")
+                await asyncio.sleep(0.05)
+            for i, char in enumerate(text):
+                await session.page.keyboard.type(char)
+                # Variable delay: occasional thinking pause every ~6-10 chars
+                delay_ms = random.randint(
+                    self.settings.human_typing_min_delay_ms,
+                    self.settings.human_typing_max_delay_ms,
+                )
+                if i > 0 and i % random.randint(6, 12) == 0:
+                    delay_ms += random.randint(200, 600)
+                await asyncio.sleep(delay_ms / 1000)
             await self._settle(session.page)
 
         return await self._run_action(
@@ -971,6 +1003,28 @@ class BrowserManager:
             return list(session.downloads)
         record = await self.session_store.get(session_id)
         return list(record.downloads)
+
+    async def extract_posts(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        session = await self.get_session(session_id)
+        return await session.page.evaluate(EXTRACT_POSTS_SCRIPT, limit)
+
+    async def extract_profile(self, session_id: str) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        return await session.page.evaluate(EXTRACT_PROFILE_SCRIPT)
+
+    async def scroll_feed(self, session_id: str, direction: str = "down", screens: int = 3) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        delta = self.settings.default_viewport_height * screens
+        if direction == "up":
+            delta = -delta
+
+        async def operation() -> None:
+            await session.page.evaluate(SMOOTH_SCROLL_SCRIPT, delta)
+            # Human pause after scroll
+            await asyncio.sleep(0.3 + random.random() * 0.5)
+            await self._settle(session.page)
+
+        return await self._run_action(session, "scroll_feed", {"direction": direction, "screens": screens}, operation)
 
     async def execute_decision(
         self,
