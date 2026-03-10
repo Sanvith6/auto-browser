@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from .base import BaseProviderAdapter, ProviderDecision
@@ -12,15 +14,23 @@ class OpenAIAdapter(BaseProviderAdapter):
 
     @property
     def default_model(self) -> str:
-        return self.settings.openai_model
+        return self.settings.openai_cli_model or self.settings.openai_model
 
     @property
     def configured(self) -> bool:
+        if self.auth_mode == "cli":
+            return self.cli_binary_exists(self.settings.openai_cli_path)
         return bool(self.settings.openai_api_key)
 
     @property
     def missing_detail(self) -> str:
+        if self.auth_mode == "cli":
+            return "OPENAI_AUTH_MODE=cli requires a working codex CLI in OPENAI_CLI_PATH"
         return "OPENAI_API_KEY is not configured"
+
+    @property
+    def auth_mode(self) -> str:
+        return self.settings.openai_auth_mode.strip().lower()
 
     async def _decide(
         self,
@@ -31,7 +41,16 @@ class OpenAIAdapter(BaseProviderAdapter):
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
     ) -> ProviderDecision:
-        model = model_override or self.default_model
+        if self.auth_mode == "cli":
+            return await self._decide_via_cli(
+                goal=goal,
+                observation=observation,
+                context_hints=context_hints,
+                previous_steps=previous_steps,
+                model_override=model_override,
+            )
+
+        model = model_override or self.settings.openai_model
         mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
         payload = {
             "model": model,
@@ -101,3 +120,57 @@ class OpenAIAdapter(BaseProviderAdapter):
             usage=usage,
             raw_text=arguments,
         )
+
+    async def _decide_via_cli(
+        self,
+        *,
+        goal: str,
+        observation: dict[str, Any],
+        context_hints: str | None,
+        previous_steps: list[dict[str, Any]],
+        model_override: str | None,
+    ) -> ProviderDecision:
+        model = model_override or self.settings.openai_cli_model
+        prompt = self.build_cli_prompt(
+            goal=goal,
+            observation=observation,
+            context_hints=context_hints,
+            previous_steps=previous_steps,
+            include_schema=False,
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_root = Path(tempdir)
+            schema_path = temp_root / "browser_action_schema.json"
+            output_path = temp_root / "decision.json"
+            schema_path.write_text(json.dumps(self.action_schema, ensure_ascii=False), encoding="utf-8")
+
+            command = [
+                self.settings.openai_cli_path,
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--cd",
+                tempdir,
+                "--ephemeral",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--image",
+                observation["screenshot_path"],
+                "-",
+            ]
+            if model:
+                command[1:1] = ["--model", model]
+
+            result = await self.run_cli(command=command, input_text=prompt, cwd=tempdir)
+            raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
+            decision = self.parse_decision_text(raw_text)
+            return ProviderDecision(
+                provider=self.provider,
+                model=model or self.default_model,
+                decision=decision,
+                usage={"auth_mode": "cli", "transport": "codex-exec"},
+                raw_text=raw_text,
+            )

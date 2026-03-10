@@ -87,6 +87,40 @@ METRICS_ENABLED=true
 
 The controller now fails closed on startup in production mode if the required security settings are missing.
 
+### Provider auth modes
+
+By default the controller talks to vendor APIs directly with API keys.
+
+If you already use subscription-backed CLIs instead, Auto Browser can route provider decisions through:
+
+- `codex` for OpenAI
+- `claude` for Anthropic / Claude Code
+- `gemini` for Gemini CLI
+
+Set the auth modes explicitly:
+
+```bash
+OPENAI_AUTH_MODE=cli
+CLAUDE_AUTH_MODE=cli
+GEMINI_AUTH_MODE=cli
+CLI_HOME=/data/cli-home
+```
+
+Then populate `data/cli-home` with the auth caches from the machine where those CLIs are already signed in:
+
+```bash
+mkdir -p data/cli-home
+rsync -a ~/.codex data/cli-home/.codex
+cp ~/.claude.json data/cli-home/.claude.json
+rsync -a ~/.claude data/cli-home/.claude
+rsync -a ~/.gemini data/cli-home/.gemini
+```
+
+Notes:
+- keep `data/cli-home` private; it contains live auth material
+- API keys are still the better default for CI/public automation
+- CLI auth is aimed at trusted single-tenant boxes like your VPS + Tailscale setup
+
 If you want **true per-session browser isolation**, use the compose override:
 
 ```bash

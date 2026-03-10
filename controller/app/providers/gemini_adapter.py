@@ -12,15 +12,23 @@ class GeminiAdapter(BaseProviderAdapter):
 
     @property
     def default_model(self) -> str:
-        return self.settings.gemini_model
+        return self.settings.gemini_cli_model or self.settings.gemini_model
 
     @property
     def configured(self) -> bool:
+        if self.auth_mode == "cli":
+            return self.cli_binary_exists(self.settings.gemini_cli_path)
         return bool(self.settings.gemini_api_key)
 
     @property
     def missing_detail(self) -> str:
+        if self.auth_mode == "cli":
+            return "GEMINI_AUTH_MODE=cli requires a working gemini CLI in GEMINI_CLI_PATH"
         return "GEMINI_API_KEY is not configured"
+
+    @property
+    def auth_mode(self) -> str:
+        return self.settings.gemini_auth_mode.strip().lower()
 
     async def _decide(
         self,
@@ -31,7 +39,16 @@ class GeminiAdapter(BaseProviderAdapter):
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
     ) -> ProviderDecision:
-        model = model_override or self.default_model
+        if self.auth_mode == "cli":
+            return await self._decide_via_cli(
+                goal=goal,
+                observation=observation,
+                context_hints=context_hints,
+                previous_steps=previous_steps,
+                model_override=model_override,
+            )
+
+        model = model_override or self.settings.gemini_model
         mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
         payload = {
             "contents": [
@@ -79,4 +96,42 @@ class GeminiAdapter(BaseProviderAdapter):
             decision=decision,
             usage=usage,
             raw_text=text,
+        )
+
+    async def _decide_via_cli(
+        self,
+        *,
+        goal: str,
+        observation: dict[str, Any],
+        context_hints: str | None,
+        previous_steps: list[dict[str, Any]],
+        model_override: str | None,
+    ) -> ProviderDecision:
+        model = model_override or self.settings.gemini_cli_model
+        prompt = self.build_cli_prompt(
+            goal=goal,
+            observation=observation,
+            context_hints=context_hints,
+            previous_steps=previous_steps,
+        )
+        command = [
+            self.settings.gemini_cli_path,
+            "--prompt",
+            prompt,
+            "--output-format",
+            "json",
+            "--approval-mode",
+            "plan",
+        ]
+        if model:
+            command.extend(["--model", model])
+
+        result = await self.run_cli(command=command)
+        decision = self.parse_decision_text(result.stdout)
+        return ProviderDecision(
+            provider=self.provider,
+            model=model or self.default_model,
+            decision=decision,
+            usage={"auth_mode": "cli", "transport": "gemini-cli"},
+            raw_text=result.stdout,
         )

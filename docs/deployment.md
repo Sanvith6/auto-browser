@@ -35,6 +35,49 @@ UPLOAD_RETENTION_HOURS=168
 AUTH_RETENTION_HOURS=168
 ```
 
+## Provider authentication choices
+
+You now have two viable ways to authenticate model providers:
+
+### Option A — API keys
+
+Use:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY`
+
+This is still the cleanest option for CI and broadly automated installs.
+
+### Option B — subscription-backed CLIs
+
+Use this on a trusted private box if you already run:
+
+- `codex` via ChatGPT/Codex login
+- `claude` via Claude Code login/subscription
+- `gemini` via Gemini CLI login
+
+Set:
+
+```env
+OPENAI_AUTH_MODE=cli
+CLAUDE_AUTH_MODE=cli
+GEMINI_AUTH_MODE=cli
+CLI_HOME=/data/cli-home
+```
+
+Then copy the signed-in CLI state into the mounted data directory:
+
+```bash
+mkdir -p data/cli-home
+rsync -a ~/.codex data/cli-home/.codex
+cp ~/.claude.json data/cli-home/.claude.json
+rsync -a ~/.claude data/cli-home/.claude
+rsync -a ~/.gemini data/cli-home/.gemini
+```
+
+Treat `data/cli-home` like a password vault. Never commit it.
+
 ## Generate an auth-state encryption key
 
 ```bash
@@ -99,7 +142,7 @@ curl -s http://127.0.0.1:8000/maintenance/cleanup \
 
 Before live debugging, gather:
 
-- OpenAI / Anthropic / Gemini API keys you intend to use
+- OpenAI / Anthropic / Gemini API keys, or populated CLI auth caches under `data/cli-home`
 - gateway credentials (Cloudflare Access or Tailscale)
 - bastion SSH details if using reverse tunnels
 - operator identity convention (`X-Operator-Id` values)

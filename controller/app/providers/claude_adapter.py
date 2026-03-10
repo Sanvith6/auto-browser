@@ -12,15 +12,23 @@ class ClaudeAdapter(BaseProviderAdapter):
 
     @property
     def default_model(self) -> str:
-        return self.settings.claude_model
+        return self.settings.claude_cli_model or self.settings.claude_model
 
     @property
     def configured(self) -> bool:
+        if self.auth_mode == "cli":
+            return self.cli_binary_exists(self.settings.claude_cli_path)
         return bool(self.settings.anthropic_api_key)
 
     @property
     def missing_detail(self) -> str:
+        if self.auth_mode == "cli":
+            return "CLAUDE_AUTH_MODE=cli requires a working claude CLI in CLAUDE_CLI_PATH"
         return "ANTHROPIC_API_KEY is not configured"
+
+    @property
+    def auth_mode(self) -> str:
+        return self.settings.claude_auth_mode.strip().lower()
 
     async def _decide(
         self,
@@ -31,7 +39,16 @@ class ClaudeAdapter(BaseProviderAdapter):
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
     ) -> ProviderDecision:
-        model = model_override or self.default_model
+        if self.auth_mode == "cli":
+            return await self._decide_via_cli(
+                goal=goal,
+                observation=observation,
+                context_hints=context_hints,
+                previous_steps=previous_steps,
+                model_override=model_override,
+            )
+
+        model = model_override or self.settings.claude_model
         mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
         payload = {
             "model": model,
@@ -93,4 +110,47 @@ class ClaudeAdapter(BaseProviderAdapter):
             decision=decision,
             usage=usage,
             raw_text=json.dumps(tool_use.get("input", {}), ensure_ascii=False),
+        )
+
+    async def _decide_via_cli(
+        self,
+        *,
+        goal: str,
+        observation: dict[str, Any],
+        context_hints: str | None,
+        previous_steps: list[dict[str, Any]],
+        model_override: str | None,
+    ) -> ProviderDecision:
+        model = model_override or self.settings.claude_cli_model
+        prompt = self.build_cli_prompt(
+            goal=goal,
+            observation=observation,
+            context_hints=context_hints,
+            previous_steps=previous_steps,
+        )
+        command = [
+            self.settings.claude_cli_path,
+            "--print",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(self.action_schema, ensure_ascii=False),
+            "--permission-mode",
+            "plan",
+            "--tools",
+            "",
+            "--no-session-persistence",
+            prompt,
+        ]
+        if model:
+            command[1:1] = ["--model", model]
+
+        result = await self.run_cli(command=command)
+        decision = self.parse_decision_text(result.stdout)
+        return ProviderDecision(
+            provider=self.provider,
+            model=model or self.default_model,
+            decision=decision,
+            usage={"auth_mode": "cli", "transport": "claude-cli"},
+            raw_text=result.stdout,
         )

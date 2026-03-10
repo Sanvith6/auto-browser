@@ -4,9 +4,11 @@ import base64
 import asyncio
 import json
 import mimetypes
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import which
 from typing import Any
 
 import httpx
@@ -22,6 +24,14 @@ class ProviderDecision:
     decision: BrowserActionDecision
     usage: dict[str, Any] | None = None
     raw_text: str | None = None
+
+
+@dataclass
+class CLIResult:
+    command: list[str]
+    stdout: str
+    stderr: str
+    returncode: int
 
 
 @dataclass
@@ -208,6 +218,140 @@ class BaseProviderAdapter(ABC):
     @property
     def action_schema(self) -> dict[str, Any]:
         return BROWSER_ACTION_SCHEMA
+
+    def build_cli_prompt(
+        self,
+        *,
+        goal: str,
+        observation: dict[str, Any],
+        context_hints: str | None,
+        previous_steps: list[dict[str, Any]],
+        include_schema: bool = True,
+    ) -> str:
+        schema_text = ""
+        if include_schema:
+            schema_text = (
+                "Return only a single JSON object that matches this JSON Schema. "
+                "Do not wrap it in markdown.\n"
+                f"{json.dumps(self.action_schema, ensure_ascii=False)}\n\n"
+            )
+        return (
+            schema_text
+            + self.build_text_prompt(
+                goal=goal,
+                observation=observation,
+                context_hints=context_hints,
+                previous_steps=previous_steps,
+            )
+        )
+
+    def cli_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self.settings.cli_home:
+            env["HOME"] = self.settings.cli_home
+        env.setdefault("CI", "1")
+        env.setdefault("NO_COLOR", "1")
+        return env
+
+    @staticmethod
+    def cli_binary_exists(path: str | None) -> bool:
+        return bool(path and which(path))
+
+    async def run_cli(
+        self,
+        *,
+        command: list[str],
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> CLIResult:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or self.cli_environment(),
+            cwd=cwd,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(input_text.encode("utf-8") if input_text is not None else None),
+                timeout=self.settings.model_request_timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise ProviderAPIError(
+                provider=self.provider,
+                message=f"CLI command timed out after {self.settings.model_request_timeout_seconds:.0f}s",
+                retryable=True,
+            ) from exc
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            detail = stderr.strip() or stdout.strip() or f"CLI exited with code {process.returncode}"
+            raise ProviderAPIError(
+                provider=self.provider,
+                message=detail[:1200],
+                retryable=False,
+            )
+        return CLIResult(command=command, stdout=stdout, stderr=stderr, returncode=process.returncode)
+
+    def parse_decision_text(self, text: str) -> BrowserActionDecision:
+        text = text.strip()
+        if not text:
+            raise RuntimeError("provider returned an empty response")
+
+        try:
+            return BrowserActionDecision.model_validate_json(text)
+        except Exception:
+            pass
+
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+
+        if payload is not None:
+            decision = self._find_decision_candidate(payload)
+            if decision is not None:
+                return decision
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+            except Exception:
+                continue
+            decision = self._find_decision_candidate(candidate)
+            if decision is not None:
+                return decision
+
+        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+
+    def parse_decision_file(self, path: Path) -> BrowserActionDecision:
+        return self.parse_decision_text(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _find_decision_candidate(payload: Any) -> BrowserActionDecision | None:
+        if isinstance(payload, dict):
+            try:
+                return BrowserActionDecision.model_validate(payload)
+            except Exception:
+                pass
+            for value in payload.values():
+                decision = BaseProviderAdapter._find_decision_candidate(value)
+                if decision is not None:
+                    return decision
+        elif isinstance(payload, list):
+            for item in payload:
+                decision = BaseProviderAdapter._find_decision_candidate(item)
+                if decision is not None:
+                    return decision
+        return None
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> dict[str, Any] | None:

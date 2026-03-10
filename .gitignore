@@ -26,5 +26,7 @@ data/downloads/*
 !data/downloads/.gitkeep
 data/tunnels/*
 !data/tunnels/.gitkeep
+data/cli-home/*
+!data/cli-home/.gitkeep
 __pycache__/
 *.pyc
