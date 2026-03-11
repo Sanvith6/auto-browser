@@ -101,7 +101,7 @@ class AgentJobQueue:
         self.orchestrator = orchestrator
         self.store = AgentJobStore(store_root)
         self.worker_count = max(1, worker_count)
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
         self._workers: list[asyncio.Task] = []
         self._started = False
         self.audit = audit_store
@@ -148,7 +148,14 @@ class AgentJobQueue:
             request=payload.model_dump(),
             operator=get_current_operator(),
         )
-        await self.queue.put(record.id)
+        try:
+            self.queue.put_nowait(record.id)
+        except asyncio.QueueFull:
+            await self.store.update_status(record.id) if hasattr(self.store, 'update_status') else None
+            record.status = "failed"
+            record.error = "Job queue is full (max 100 queued jobs)"
+            await self.store.update(record)
+            raise RuntimeError("Job queue is at capacity. Try again later.")
         await self._audit("agent_job_enqueued", "queued", record)
         return record.model_dump()
 
@@ -159,7 +166,13 @@ class AgentJobQueue:
             request=payload.model_dump(),
             operator=get_current_operator(),
         )
-        await self.queue.put(record.id)
+        try:
+            self.queue.put_nowait(record.id)
+        except asyncio.QueueFull:
+            record.status = "failed"
+            record.error = "Job queue is full (max 100 queued jobs)"
+            await self.store.update(record)
+            raise RuntimeError("Job queue is at capacity. Try again later.")
         await self._audit("agent_job_enqueued", "queued", record)
         return record.model_dump()
 

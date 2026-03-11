@@ -1,6 +1,102 @@
 """Browser-side JavaScript constants used by BrowserManager for page observation."""
 from __future__ import annotations
 
+# Injected before every page load via add_init_script().
+# Removes automation signals, mocks realistic browser properties.
+STEALTH_INIT_SCRIPT = r"""
+() => {
+  // Remove webdriver flag
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined, configurable: true,
+    });
+  } catch (_) {}
+
+  // Chrome runtime object (many sites check for this)
+  if (\!window.chrome) {
+    window.chrome = {
+      runtime: {
+        onMessage: { addListener: () => {}, removeListener: () => {} },
+        connect: () => ({ onDisconnect: { addListener: () => {} }, postMessage: () => {} }),
+        sendMessage: () => {},
+        id: undefined,
+      },
+      loadTimes: () => ({}),
+      csi: () => ({}),
+      app: { isInstalled: false },
+    };
+  }
+
+  // Realistic navigator.plugins (headless has none by default)
+  try {
+    const plugins = [
+      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+    ];
+    const arr = { length: plugins.length, refresh: () => {}, item: (i) => plugins[i], namedItem: (n) => plugins.find(p => p.name === n) || null };
+    plugins.forEach((p, i) => { arr[i] = p; });
+    Object.setPrototypeOf(arr, PluginArray.prototype);
+    Object.defineProperty(navigator, 'plugins', { get: () => arr });
+  } catch (_) {}
+
+  // Languages
+  try {
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  } catch (_) {}
+
+  // Permissions API patch
+  try {
+    const origQuery = window.Permissions.prototype.query;
+    window.Permissions.prototype.query = function(params) {
+      if (params.name === 'notifications') {
+        return Promise.resolve({ state: Notification.permission, onchange: null });
+      }
+      return origQuery.call(this, params);
+    };
+  } catch (_) {}
+
+  // Canvas fingerprint noise
+  try {
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+      const ctx = this.getContext('2d');
+      if (ctx && this.width > 0 && this.height > 0) {
+        try {
+          const img = ctx.getImageData(0, 0, 1, 1);
+          img.data[0] ^= 1;
+          ctx.putImageData(img, 0, 0);
+          const result = origToDataURL.call(this, type, quality);
+          img.data[0] ^= 1;
+          ctx.putImageData(img, 0, 0);
+          return result;
+        } catch (_) {}
+      }
+      return origToDataURL.call(this, type, quality);
+    };
+  } catch (_) {}
+
+  // WebGL vendor / renderer — realistic Intel values
+  try {
+    const patchGL = (proto) => {
+      const orig = proto.getParameter;
+      proto.getParameter = function(p) {
+        if (p === 37445) return 'Intel Inc.';
+        if (p === 37446) return 'Intel Iris OpenGL Engine';
+        return orig.call(this, p);
+      };
+    };
+    patchGL(WebGLRenderingContext.prototype);
+    if (typeof WebGL2RenderingContext \!== 'undefined') patchGL(WebGL2RenderingContext.prototype);
+  } catch (_) {}
+
+  // Realistic hardware values
+  try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch (_) {}
+  try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch (_) {}
+  try { Object.defineProperty(screen, 'colorDepth', { get: () => 24 }); } catch (_) {}
+}
+"""
+
 INTERACTABLES_SCRIPT = r"""
 (limit) => {
   function isVisible(el) {
@@ -297,3 +393,7 @@ FIND_SEARCH_INPUT_SCRIPT = r"""
   return null;
 }
 """
+
+async def apply_stealth(page: object) -> None:
+    """Inject stealth init script into a page before any navigation."""
+    await page.add_init_script(STEALTH_INIT_SCRIPT)

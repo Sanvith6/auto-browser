@@ -161,7 +161,7 @@ class BrowserOrchestrator:
                 break
             if index == max_steps - 1:
                 final_status = "max_steps_reached"
-        final_session = await self.manager._session_summary(await self.manager.get_session(session_id))
+        final_session = await self.manager.get_session_summary(session_id)
         payload = AgentRunResult(
             provider=provider_name,
             model=model_name,

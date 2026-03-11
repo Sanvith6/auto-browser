@@ -1,3 +1,4 @@
+import random
 from functools import lru_cache
 
 from pydantic import AliasChoices, Field
@@ -200,6 +201,16 @@ class Settings(BaseSettings):
     human_typing_min_delay_ms: int = Field(40, alias="HUMAN_TYPING_MIN_DELAY_MS")
     human_typing_max_delay_ms: int = Field(130, alias="HUMAN_TYPING_MAX_DELAY_MS")
 
+    # Stealth / anti-bot
+    stealth_enabled: bool = Field(True, alias="STEALTH_ENABLED")
+    user_agent_pool: str = Field(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        alias="USER_AGENT_POOL",
+    )
+
     # Proxy (session-level override supported in CreateSessionRequest)
     default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER")
     default_proxy_username: str | None = Field(None, alias="DEFAULT_PROXY_USERNAME")
@@ -232,6 +243,11 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment_name == "production"
 
+
+    @property
+    def random_user_agent(self) -> str:
+        agents = [a.strip() for a in self.user_agent_pool.split(",") if a.strip()]
+        return random.choice(agents) if agents else ""
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

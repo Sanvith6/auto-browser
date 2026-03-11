@@ -33,6 +33,8 @@ from .browser_scripts import (
     FIND_LIKE_BUTTON_SCRIPT,
     FIND_FOLLOW_BUTTON_SCRIPT,
     FIND_SEARCH_INPUT_SCRIPT,
+    STEALTH_INIT_SCRIPT,
+    apply_stealth,
 )
 
 logger = logging.getLogger(__name__)
@@ -443,15 +445,19 @@ class BrowserManager:
         proxy_username = request_proxy_username or self.settings.default_proxy_username
         proxy_password = request_proxy_password or self.settings.default_proxy_password
 
+        vw = self.settings.default_viewport_width + random.randint(-20, 20)
+        vh = self.settings.default_viewport_height + random.randint(-10, 10)
         context_kwargs: dict[str, Any] = {
-            "viewport": {
-                "width": self.settings.default_viewport_width,
-                "height": self.settings.default_viewport_height,
-            },
+            "viewport": {"width": vw, "height": vh},
             "accept_downloads": True,
         }
-        if user_agent:
-            context_kwargs["user_agent"] = user_agent
+        # Use provided UA or pick one from the pool
+        effective_ua = user_agent or (self.settings.random_user_agent if self.settings.stealth_enabled else None)
+        if effective_ua:
+            context_kwargs["user_agent"] = effective_ua
+        if self.settings.stealth_enabled:
+            context_kwargs.setdefault("timezone_id", "America/New_York")
+            context_kwargs.setdefault("locale", "en-US")
         if proxy_server:
             proxy_cfg: dict[str, Any] = {"server": proxy_server}
             if proxy_username:
@@ -476,6 +482,8 @@ class BrowserManager:
 
             page = await context.new_page()
             page.set_default_timeout(self.settings.action_timeout_ms)
+            if self.settings.stealth_enabled:
+                await apply_stealth(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -646,6 +654,14 @@ class BrowserManager:
         async def operation() -> None:
             await session.page.goto(url, wait_until="domcontentloaded")
             await self._settle(session.page)
+            # Check for bot challenge pages after navigation
+            challenge = await self._check_bot_challenge(session)
+            if challenge:
+                logger.warning("bot challenge detected after navigation: %s", challenge)
+                try:
+                    await self.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
+                except Exception:
+                    pass
 
         return await self._run_action(session, "navigate", {"url": url}, operation)
 
@@ -742,14 +758,21 @@ class BrowserManager:
             locator = session.page.locator(target["selector"]).first
             await locator.scroll_into_view_if_needed()
             await locator.click()
+            await asyncio.sleep(0.05 + random.random() * 0.1)
             if clear_first:
-                try:
-                    await locator.fill(text)
-                except Exception:
-                    await session.page.keyboard.press("Control+A")
-                    await session.page.keyboard.type(text, delay=self.settings.typing_delay_ms)
-            else:
-                await session.page.keyboard.type(text, delay=self.settings.typing_delay_ms)
+                await session.page.keyboard.press("Control+a")
+                await asyncio.sleep(0.03)
+                await session.page.keyboard.press("Delete")
+                await asyncio.sleep(0.05)
+            for i, char in enumerate(text):
+                await session.page.keyboard.type(char)
+                delay_ms = random.randint(
+                    self.settings.human_typing_min_delay_ms,
+                    self.settings.human_typing_max_delay_ms,
+                )
+                if i > 0 and i % random.randint(6, 12) == 0:
+                    delay_ms += random.randint(200, 600)
+                await asyncio.sleep(delay_ms / 1000)
             await self._settle(session.page)
 
         return await self._run_action(
@@ -1408,6 +1431,11 @@ class BrowserManager:
                 )
                 raise
             except PlaywrightError as exc:
+                try:
+                    fail_label = f"fail-{action_name}-{datetime.now(UTC).strftime('%H%M%S')}"
+                    await self._capture_screenshot(session, fail_label)
+                except Exception:
+                    pass
                 failed = await self._light_snapshot(session, label=f"failed-{action_name}")
                 await self._append_jsonl(
                     session.artifact_dir / "actions.jsonl",
@@ -1461,6 +1489,47 @@ class BrowserManager:
                 "target": target,
                 "verification": verification,
             }
+
+
+    # Known bot challenge URL patterns and page signals
+    _BOT_CHALLENGE_SIGNALS = [
+        "challenge.cloudflare.com",
+        "challenges.cloudflare.com",
+        "/cdn-cgi/challenge-platform/",
+        "captcha",
+        "recaptcha",
+        "hcaptcha",
+        "arkose",
+        "unusual activity",
+        "suspicious activity",
+        "verify you're human",
+        "verify you are human",
+        "security check",
+        "access denied",
+        "bot detected",
+    ]
+
+    async def _check_bot_challenge(self, session: BrowserSession) -> dict[str, Any] | None:
+        """Return a takeover payload if a bot challenge is detected, else None."""
+        url = session.page.url.lower()
+        title = ""
+        body_text = ""
+        try:
+            title = (await session.page.title()).lower()
+            body_text = (await session.page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")).lower()
+        except Exception:
+            pass
+
+        combined = f"{url} {title} {body_text}"
+        for signal in self._BOT_CHALLENGE_SIGNALS:
+            if signal in combined:
+                return {
+                    "bot_challenge_detected": True,
+                    "signal": signal,
+                    "url": session.page.url,
+                    "title": title,
+                }
+        return None
 
     async def _observation_payload(
         self,
@@ -1733,6 +1802,11 @@ class BrowserManager:
             "last_action": session.last_action,
             "trace_path": str(session.trace_path),
         }
+
+    async def get_session_summary(self, session_id: str) -> dict[str, Any]:
+        """Public API for getting a session summary by ID."""
+        session = await self.get_session(session_id)
+        return await self._session_summary(session)
 
     async def _persist_session(self, session: BrowserSession, *, status: SessionStatus) -> None:
         summary = await self._session_summary(
