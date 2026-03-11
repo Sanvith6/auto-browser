@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ from app.models import McpToolCallContent, McpToolCallResponse
 
 class McpTransportTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
         self.gateway = SimpleNamespace(
             list_tools=lambda: [
                 {
@@ -35,6 +37,7 @@ class McpTransportTests(unittest.TestCase):
             server_title="Auto Browser MCP",
             server_version="0.2.0",
             allowed_origins=["https://allowed.example"],
+            session_store_path=f"{self.tempdir.name}/mcp-sessions.json",
         )
         app = FastAPI()
 
@@ -51,6 +54,9 @@ class McpTransportTests(unittest.TestCase):
             return await self.transport.handle_delete_request(request)
 
         self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
 
     def _initialize(self) -> tuple[str, str]:
         response = self.client.post(
@@ -155,6 +161,39 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], -32000)
+
+    def test_sessions_survive_transport_restart_when_store_path_is_configured(self) -> None:
+        session_id, protocol_version = self._initialize()
+        init_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        )
+        self.assertEqual(init_response.status_code, 202)
+
+        restarted = McpHttpTransport(
+            tool_gateway=self.gateway,
+            server_name="auto-browser",
+            server_title="Auto Browser MCP",
+            server_version="0.2.0",
+            allowed_origins=["https://allowed.example"],
+            session_store_path=f"{self.tempdir.name}/mcp-sessions.json",
+        )
+        app = FastAPI()
+
+        @app.post("/mcp")
+        async def post_mcp(request: Request):
+            return await restarted.handle_post_request(request)
+
+        restarted_client = TestClient(app)
+        list_response = restarted_client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}},
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()["result"]["tools"][0]["name"], "browser.observe")
 
 
 if __name__ == "__main__":

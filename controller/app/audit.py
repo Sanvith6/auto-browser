@@ -49,10 +49,12 @@ class AuditStoreBackend(Protocol):
 
 
 class FileAuditStore:
-    def __init__(self, root: str | Path, *, max_events: int):
+    def __init__(self, root: str | Path, *, max_events: int, trim_interval: int = 500):
         self.root = Path(root)
         self.events_path = self.root / "events.jsonl"
         self.max_events = max(0, max_events)
+        self.trim_interval = max(1, trim_interval)
+        self._writes_since_trim = 0
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -60,8 +62,10 @@ class FileAuditStore:
     async def append_event(self, event: AuditEvent) -> None:
         line = event.model_dump_json()
         await asyncio.to_thread(self._append_text, self.events_path, line + "\n")
-        if self.max_events:
+        self._writes_since_trim += 1
+        if self.max_events and self._writes_since_trim >= self.trim_interval:
             await asyncio.to_thread(self._trim_sync)
+            self._writes_since_trim = 0
 
     async def list(
         self,
@@ -241,9 +245,16 @@ class SQLiteAuditStore:
 
 
 class AuditStore:
-    def __init__(self, root: str | Path, *, db_path: str | None = None, max_events: int = 10000):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        db_path: str | None = None,
+        max_events: int = 10000,
+        file_trim_interval: int = 500,
+    ):
         self._lock = asyncio.Lock()
-        self.file_store = FileAuditStore(root, max_events=max_events)
+        self.file_store = FileAuditStore(root, max_events=max_events, trim_interval=file_trim_interval)
         self.sqlite_store = SQLiteAuditStore(db_path, max_events=max_events) if db_path else None
         self._primary: AuditStoreBackend = self.file_store
 

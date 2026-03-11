@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -184,11 +185,18 @@ class SQLiteApprovalStore:
 
 
 class ApprovalStore:
-    def __init__(self, root: str | Path, db_path: str | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        db_path: str | None = None,
+        *,
+        approval_ttl_minutes: int = 15,
+    ):
         self._lock = asyncio.Lock()
         self.file_store = FileApprovalStore(root)
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
+        self.approval_ttl = timedelta(minutes=max(1, approval_ttl_minutes))
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -254,6 +262,7 @@ class ApprovalStore:
             approval = await self.get(approval_id)
             if approval.status != "approved":
                 raise PermissionError(f"approval {approval_id} is not approved")
+            self._ensure_not_expired(approval)
             now = self._timestamp()
             approval.status = "executed"
             approval.updated_at = now
@@ -276,6 +285,7 @@ class ApprovalStore:
             raise PermissionError(f"approval {approval_id} does not cover {kind}")
         if approval.status != "approved":
             raise PermissionError(f"approval {approval_id} is not approved")
+        self._ensure_not_expired(approval)
         if not self._actions_match(approval.action, action):
             raise PermissionError(f"approval {approval_id} does not match the requested action")
         return approval
@@ -296,6 +306,10 @@ class ApprovalStore:
             approval.updated_at = now
             approval.decided_at = now
             approval.decision_comment = comment
+            if status == "approved":
+                approval.approved_expires_at = self._expiry_timestamp(now)
+            else:
+                approval.approved_expires_at = None
             await self._persist(approval)
             return approval
 
@@ -321,8 +335,21 @@ class ApprovalStore:
         excluded = {"reason", "confidence"}
         return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
+    def _ensure_not_expired(self, approval: ApprovalRecord) -> None:
+        if approval.approved_expires_at is None:
+            return
+        expires_at = self._parse_timestamp(approval.approved_expires_at)
+        if expires_at <= datetime.now(UTC):
+            raise PermissionError(f"approval {approval.id} has expired")
+
+    def _expiry_timestamp(self, decided_at: str) -> str:
+        decided = self._parse_timestamp(decided_at)
+        return (decided + self.approval_ttl).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
     @staticmethod
     def _timestamp() -> str:
-        from datetime import UTC, datetime
-
         return datetime.now(UTC).isoformat().replace("+00:00", "Z")

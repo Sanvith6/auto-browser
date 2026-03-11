@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -214,3 +214,37 @@ class ApprovalStoreSQLiteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(approved), 1)
             self.assertEqual(approved[0].id, approval.id)
             self.assertTrue(db_path.exists())
+
+    async def test_expired_approval_is_rejected_for_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir) / "approvals"
+            store = ApprovalStore(root)
+            await store.startup()
+
+            action = BrowserActionDecision(
+                action="click",
+                reason="Submit payment",
+                element_id="op-pay",
+                risk_category="payment",
+            )
+            approval = await store.create_or_reuse_pending(
+                session_id="session-1",
+                kind="payment",
+                reason="Payment requires approval",
+                action=action,
+                observation={"url": "https://example.com"},
+            )
+            approval = await store.approve(approval.id, comment="approved")
+            approval.approved_expires_at = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+            await store.file_store.upsert(approval)
+
+            with self.assertRaises(PermissionError):
+                await store.require_approved(
+                    approval_id=approval.id,
+                    session_id="session-1",
+                    kind="payment",
+                    action=action,
+                )
+
+            with self.assertRaises(PermissionError):
+                await store.mark_executed(approval.id)

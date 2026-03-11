@@ -29,11 +29,16 @@ from .models import (
     PressRequest,
     SaveStorageStateRequest,
     ScrollRequest,
+    SocialCommentRequest,
+    SocialDmRequest,
+    SocialLoginRequest,
     SocialScrollRequest,
     SocialPostRequest,
     SocialLikeRequest,
     SocialFollowRequest,
+    SocialRepostRequest,
     SocialSearchRequest,
+    SocialUnfollowRequest,
     TabIndexRequest,
     TypeRequest,
     UploadRequest,
@@ -42,6 +47,7 @@ from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
 from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exempt_path
 from .runtime_policy import validate_runtime_policy
+from .social_errors import SocialActionError
 from .tool_gateway import McpToolGateway
 
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +80,7 @@ mcp_transport = McpHttpTransport(
     server_title="Auto Browser MCP",
     server_version="0.2.0",
     allowed_origins=settings.mcp_allowed_origin_list,
+    session_store_path=settings.mcp_session_store_path,
 )
 
 
@@ -103,6 +110,11 @@ app = FastAPI(
 )
 
 app.mount("/artifacts", StaticFiles(directory=settings.artifact_root), name="artifacts")
+
+
+@app.exception_handler(SocialActionError)
+async def handle_social_action_error(_: Request, exc: SocialActionError) -> JSONResponse:
+    return JSONResponse(status_code=400, content=exc.payload)
 
 
 @app.middleware("http")
@@ -360,6 +372,7 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
             user_agent=payload.user_agent,
+            totp_secret=payload.totp_secret,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -564,6 +577,14 @@ async def social_extract_posts(session_id: str, limit: int = 20) -> list:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 
 
+@app.get("/sessions/{session_id}/social/comments")
+async def social_extract_comments(session_id: str, limit: int = 20) -> list:
+    try:
+        return await manager.extract_comments(session_id, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
 @app.get("/sessions/{session_id}/social/profile")
 async def social_extract_profile(session_id: str) -> dict:
     try:
@@ -576,6 +597,25 @@ async def social_extract_profile(session_id: str) -> dict:
 async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
     try:
         return await manager.post_content(session_id, text=payload.text, approval_id=payload.approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/comment")
+async def social_comment(session_id: str, payload: SocialCommentRequest) -> dict:
+    try:
+        return await manager.comment_on_post(
+            session_id,
+            text=payload.text,
+            post_index=payload.post_index,
+            approval_id=payload.approval_id,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
@@ -604,6 +644,78 @@ async def social_like(session_id: str, payload: SocialLikeRequest) -> dict:
 async def social_follow(session_id: str, payload: SocialFollowRequest) -> dict:
     try:
         return await manager.follow_user(session_id, approval_id=payload.approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/unfollow")
+async def social_unfollow(session_id: str, payload: SocialUnfollowRequest) -> dict:
+    try:
+        return await manager.unfollow_user(session_id, approval_id=payload.approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/repost")
+async def social_repost(session_id: str, payload: SocialRepostRequest) -> dict:
+    try:
+        return await manager.repost_post(
+            session_id,
+            post_index=payload.post_index,
+            approval_id=payload.approval_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/dm")
+async def social_dm(session_id: str, payload: SocialDmRequest) -> dict:
+    try:
+        return await manager.send_direct_message(
+            session_id,
+            recipient=payload.recipient,
+            text=payload.text,
+            approval_id=payload.approval_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/social/login")
+async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
+    try:
+        return await manager.social_login(
+            session_id,
+            platform=payload.platform,
+            username=payload.username,
+            password=payload.password,
+            approval_id=payload.approval_id,
+            totp_secret=payload.totp_secret,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:

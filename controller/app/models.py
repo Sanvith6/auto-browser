@@ -13,6 +13,7 @@ class CreateSessionRequest(BaseModel):
     proxy_username: str | None = None
     proxy_password: str | None = None
     user_agent: str | None = None
+    totp_secret: str | None = Field(default=None, repr=False)
 
 
 class ClickRequest(BaseModel):
@@ -100,9 +101,14 @@ ActionName = Literal[
     "go_back",
     "go_forward",
     "upload",
+    "social_login",
     "social_post",
+    "social_comment",
     "social_like",
     "social_follow",
+    "social_unfollow",
+    "social_repost",
+    "social_dm",
     "request_human_takeover",
     "done",
 ]
@@ -145,13 +151,26 @@ class BrowserActionDecision(BaseModel):
     wait_ms: int = Field(default=1000, ge=0, le=30000)
     url: str | None = None
     file_path: str | None = None
+    recipient: str | None = None
+    platform: str | None = None
+    username: str | None = None
 
     @model_validator(mode="after")
     def validate_action_requirements(self) -> "BrowserActionDecision":
         if self.risk_category is None:
             if self.action in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward", "done"}:
                 self.risk_category = "read"
-            elif self.action in {"social_post", "social_like", "social_follow"}:
+            elif self.action == "social_login":
+                self.risk_category = "account_change"
+            elif self.action in {
+                "social_post",
+                "social_comment",
+                "social_like",
+                "social_follow",
+                "social_unfollow",
+                "social_repost",
+                "social_dm",
+            }:
                 self.risk_category = "post"
             elif self.action == "upload":
                 self.risk_category = "upload"
@@ -170,12 +189,22 @@ class BrowserActionDecision(BaseModel):
                 raise ValueError("select_option requires element_id or selector")
             if self.value is None and self.label is None and self.index is None:
                 raise ValueError("select_option requires value, label, or index")
-        if self.action in {"type", "social_post"}:
+        if self.action in {"type", "social_post", "social_comment"}:
             if not has_locator_target:
                 if self.action == "type":
                     raise ValueError("type requires element_id or selector")
             if not self.text:
                 raise ValueError(f"{self.action} requires text")
+        if self.action == "social_dm":
+            if not self.text:
+                raise ValueError("social_dm requires text")
+            if not self.recipient:
+                raise ValueError("social_dm requires recipient")
+        if self.action == "social_login":
+            if not self.platform:
+                raise ValueError("social_login requires platform")
+            if not self.username:
+                raise ValueError("social_login requires username")
         if self.action == "press" and not self.key:
             raise ValueError("press requires key")
         if self.action == "navigate" and not self.url:
@@ -194,6 +223,9 @@ class BrowserActionDecision(BaseModel):
             "go_forward",
             "social_like",
             "social_follow",
+            "social_unfollow",
+            "social_repost",
+            "social_login",
         }:
             return self
         return self
@@ -265,6 +297,7 @@ class ApprovalRecord(BaseModel):
     observation: dict[str, Any] | None = None
     decision_comment: str | None = None
     decided_at: str | None = None
+    approved_expires_at: str | None = None
     executed_at: str | None = None
 
 
@@ -359,6 +392,12 @@ class SocialPostRequest(BaseModel):
     approval_id: str | None = None
 
 
+class SocialCommentRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
+    post_index: int = Field(default=0, ge=0, le=50)
+    approval_id: str | None = None
+
+
 class SocialLikeRequest(BaseModel):
     post_index: int = Field(default=0, ge=0, le=50)
     approval_id: str | None = None
@@ -368,8 +407,35 @@ class SocialFollowRequest(BaseModel):
     approval_id: str | None = None
 
 
+class SocialUnfollowRequest(BaseModel):
+    approval_id: str | None = None
+
+
+class SocialRepostRequest(BaseModel):
+    post_index: int = Field(default=0, ge=0, le=50)
+    approval_id: str | None = None
+
+
+class SocialDmRequest(BaseModel):
+    recipient: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=5000)
+    approval_id: str | None = None
+
+
+class SocialLoginRequest(BaseModel):
+    platform: Literal["x", "twitter", "instagram", "linkedin"]
+    username: str = Field(min_length=1, max_length=500)
+    password: str = Field(min_length=1, max_length=5000, repr=False)
+    approval_id: str | None = None
+    totp_secret: str | None = Field(default=None, max_length=500, repr=False)
+
+
 class SocialSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+
+
+class SocialScrapeCommentsRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 BROWSER_ACTION_SCHEMA = BrowserActionDecision.model_json_schema()

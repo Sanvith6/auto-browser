@@ -18,6 +18,7 @@ from .models import (
     McpToolCallResponse,
     McpToolDescriptor,
 )
+from .social_errors import SocialActionError
 
 
 class EmptyInput(BaseModel):
@@ -105,6 +106,12 @@ class SocialPostInput(SessionIdInput):
     approval_id: str | None = None
 
 
+class SocialCommentInput(SessionIdInput):
+    text: str = Field(min_length=1, max_length=5000)
+    post_index: int = Field(default=0, ge=0, le=50)
+    approval_id: str | None = None
+
+
 class SocialLikeInput(SessionIdInput):
     post_index: int = Field(default=0, ge=0, le=50)
     approval_id: str | None = None
@@ -112,6 +119,29 @@ class SocialLikeInput(SessionIdInput):
 
 class SocialFollowInput(SessionIdInput):
     approval_id: str | None = None
+
+
+class SocialUnfollowInput(SessionIdInput):
+    approval_id: str | None = None
+
+
+class SocialRepostInput(SessionIdInput):
+    post_index: int = Field(default=0, ge=0, le=50)
+    approval_id: str | None = None
+
+
+class SocialDmInput(SessionIdInput):
+    recipient: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=5000)
+    approval_id: str | None = None
+
+
+class SocialLoginInput(SessionIdInput):
+    platform: Literal["x", "twitter", "instagram", "linkedin"]
+    username: str = Field(min_length=1, max_length=500)
+    password: str = Field(min_length=1, max_length=5000, repr=False)
+    approval_id: str | None = None
+    totp_secret: str | None = Field(default=None, repr=False)
 
 
 class SocialSearchInput(SessionIdInput):
@@ -279,6 +309,12 @@ class McpToolGateway:
                     handler=self._social_extract_posts,
                 ),
                 ToolSpec(
+                    name="social.extract_comments",
+                    description="Scrape visible comments/replies from the current post page.",
+                    input_model=SocialScrapeInput,
+                    handler=self._social_extract_comments,
+                ),
+                ToolSpec(
                     name="social.extract_profile",
                     description="Extract profile info (username, bio, followers, following, avatar) from the current page.",
                     input_model=SessionIdInput,
@@ -293,6 +329,15 @@ class McpToolGateway:
                     ),
                     input_model=SocialPostInput,
                     handler=self._social_post,
+                ),
+                ToolSpec(
+                    name="social.comment",
+                    description=(
+                        "Reply/comment on a visible post. Use post_index to target a specific post. "
+                        "If approval_id is omitted, this returns an approval_required error."
+                    ),
+                    input_model=SocialCommentInput,
+                    handler=self._social_comment,
                 ),
                 ToolSpec(
                     name="social.like",
@@ -312,6 +357,39 @@ class McpToolGateway:
                     ),
                     input_model=SocialFollowInput,
                     handler=self._social_follow,
+                ),
+                ToolSpec(
+                    name="social.unfollow",
+                    description=(
+                        "Find and click the unfollow/following button on the current profile page. "
+                        "If approval_id is omitted, this returns an approval_required error."
+                    ),
+                    input_model=SocialUnfollowInput,
+                    handler=self._social_unfollow,
+                ),
+                ToolSpec(
+                    name="social.repost",
+                    description=(
+                        "Find and click the repost/retweet button for a visible post. "
+                        "If approval_id is omitted, this returns an approval_required error."
+                    ),
+                    input_model=SocialRepostInput,
+                    handler=self._social_repost,
+                ),
+                ToolSpec(
+                    name="social.dm",
+                    description=(
+                        "Send a direct message on the current supported social platform. "
+                        "If approval_id is omitted, this returns an approval_required error."
+                    ),
+                    input_model=SocialDmInput,
+                    handler=self._social_dm,
+                ),
+                ToolSpec(
+                    name="social.login",
+                    description="Navigate to the platform login flow, enter credentials, handle TOTP if configured, and save auth state.",
+                    input_model=SocialLoginInput,
+                    handler=self._social_login,
                 ),
                 ToolSpec(
                     name="social.search",
@@ -352,6 +430,13 @@ class McpToolGateway:
                 structuredContent=detail,
                 isError=True,
             )
+        except SocialActionError as exc:
+            detail = exc.payload
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
+                structuredContent=detail,
+                isError=True,
+            )
         except Exception as exc:
             return self._error_response(str(exc))
 
@@ -372,6 +457,7 @@ class McpToolGateway:
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
             user_agent=payload.user_agent,
+            totp_secret=payload.totp_secret,
         )
 
     async def _list_sessions(self, _: EmptyInput) -> list[dict[str, Any]]:
@@ -456,6 +542,9 @@ class McpToolGateway:
     async def _social_extract_posts(self, payload: SocialScrapeInput) -> list[dict[str, Any]]:
         return await self.manager.extract_posts(payload.session_id, limit=payload.limit)
 
+    async def _social_extract_comments(self, payload: SocialScrapeInput) -> list[dict[str, Any]]:
+        return await self.manager.extract_comments(payload.session_id, limit=payload.limit)
+
     async def _social_extract_profile(self, payload: SessionIdInput) -> dict[str, Any]:
         return await self.manager.extract_profile(payload.session_id)
 
@@ -463,6 +552,14 @@ class McpToolGateway:
         return await self.manager.post_content(
             payload.session_id,
             text=payload.text,
+            approval_id=payload.approval_id,
+        )
+
+    async def _social_comment(self, payload: SocialCommentInput) -> dict[str, Any]:
+        return await self.manager.comment_on_post(
+            payload.session_id,
+            text=payload.text,
+            post_index=payload.post_index,
             approval_id=payload.approval_id,
         )
 
@@ -475,6 +572,34 @@ class McpToolGateway:
 
     async def _social_follow(self, payload: SocialFollowInput) -> dict[str, Any]:
         return await self.manager.follow_user(payload.session_id, approval_id=payload.approval_id)
+
+    async def _social_unfollow(self, payload: SocialUnfollowInput) -> dict[str, Any]:
+        return await self.manager.unfollow_user(payload.session_id, approval_id=payload.approval_id)
+
+    async def _social_repost(self, payload: SocialRepostInput) -> dict[str, Any]:
+        return await self.manager.repost_post(
+            payload.session_id,
+            post_index=payload.post_index,
+            approval_id=payload.approval_id,
+        )
+
+    async def _social_dm(self, payload: SocialDmInput) -> dict[str, Any]:
+        return await self.manager.send_direct_message(
+            payload.session_id,
+            recipient=payload.recipient,
+            text=payload.text,
+            approval_id=payload.approval_id,
+        )
+
+    async def _social_login(self, payload: SocialLoginInput) -> dict[str, Any]:
+        return await self.manager.social_login(
+            payload.session_id,
+            platform=payload.platform,
+            username=payload.username,
+            password=payload.password,
+            approval_id=payload.approval_id,
+            totp_secret=payload.totp_secret,
+        )
 
     async def _social_search(self, payload: SocialSearchInput) -> dict[str, Any]:
         return await self.manager.search_page(payload.session_id, query=payload.query)

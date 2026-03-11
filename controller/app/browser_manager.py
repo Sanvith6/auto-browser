@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import inspect
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +16,11 @@ from uuid import uuid4
 
 from playwright.async_api import Browser, BrowserContext, Error as PlaywrightError, Page, Playwright, async_playwright
 
+try:  # pragma: no cover - optional until dependency is installed in runtime image
+    import pyotp
+except Exception:  # pragma: no cover - graceful fallback for non-login test runs
+    pyotp = None  # type: ignore[assignment]
+
 from .audit import AuditStore
 from .approvals import ApprovalRequiredError, ApprovalStore
 from .auth_state import AuthStateManager
@@ -22,6 +29,7 @@ from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionS
 from .ocr import OCRExtractor
 from .session_store import DurableSessionStore
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
+from .social_errors import SocialActionError
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .browser_scripts import (
     INTERACTABLES_SCRIPT,
@@ -29,11 +37,14 @@ from .browser_scripts import (
     PAGE_SUMMARY_SCRIPT,
     EXTRACT_POSTS_SCRIPT,
     EXTRACT_PROFILE_SCRIPT,
+    EXTRACT_COMMENTS_SCRIPT,
     SMOOTH_SCROLL_SCRIPT,
     FIND_LIKE_BUTTON_SCRIPT,
     FIND_FOLLOW_BUTTON_SCRIPT,
+    FIND_UNFOLLOW_BUTTON_SCRIPT,
+    FIND_REPLY_BUTTON_SCRIPT,
+    FIND_REPOST_BUTTON_SCRIPT,
     FIND_SEARCH_INPUT_SCRIPT,
-    STEALTH_INIT_SCRIPT,
     apply_stealth,
 )
 
@@ -71,6 +82,8 @@ class BrowserSession:
     last_action: str | None = None
     last_auth_state_path: Path | None = None
     tunnel_error: str | None = None
+    mouse_position: tuple[float, float] | None = None
+    totp_secret: str | None = None
 
 
 class BrowserManager:
@@ -89,7 +102,10 @@ class BrowserManager:
         if self.settings.state_db_path:
             Path(self.settings.state_db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         Path(self.settings.session_store_root).mkdir(parents=True, exist_ok=True)
-        self.approvals = ApprovalStore(self.settings.approval_root, db_path=self.settings.state_db_path)
+        approval_kwargs: dict[str, Any] = {"db_path": self.settings.state_db_path}
+        if "approval_ttl_minutes" in inspect.signature(ApprovalStore).parameters:
+            approval_kwargs["approval_ttl_minutes"] = self.settings.approval_ttl_minutes
+        self.approvals = ApprovalStore(self.settings.approval_root, **approval_kwargs)
         self.audit = AuditStore(
             self.settings.audit_root,
             db_path=self.settings.state_db_path,
@@ -414,6 +430,7 @@ class BrowserManager:
         request_proxy_username: str | None = None,
         request_proxy_password: str | None = None,
         user_agent: str | None = None,
+        totp_secret: str | None = None,
     ) -> dict[str, Any]:
         if start_url:
             self._assert_url_allowed(start_url)
@@ -458,6 +475,12 @@ class BrowserManager:
         if self.settings.stealth_enabled:
             context_kwargs.setdefault("timezone_id", "America/New_York")
             context_kwargs.setdefault("locale", "en-US")
+            context_kwargs.setdefault(
+                "extra_http_headers",
+                {
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
         if proxy_server:
             proxy_cfg: dict[str, Any] = {"server": proxy_server}
             if proxy_username:
@@ -503,6 +526,8 @@ class BrowserManager:
                 shared_browser_process=runtime is None,
                 max_live_sessions_per_browser_node=1,
                 last_auth_state_path=source_path if storage_state_path else None,
+                mouse_position=(vw / 2, vh / 2),
+                totp_secret=totp_secret,
             )
             self._attach_page_listeners(page, session)
             if hasattr(context, "on"):
@@ -526,6 +551,7 @@ class BrowserManager:
                     "storage_state_path": storage_state_path,
                     "isolation_mode": session.isolation_mode,
                     "browser_node": session.browser_node_name,
+                    "totp_enabled": bool(totp_secret),
                 },
             )
             return summary
@@ -622,6 +648,10 @@ class BrowserManager:
                 approval_id=approval.id,
             )
             latest = await self.approvals.get(approval.id)
+        elif decision.action == "social_login":
+            raise PermissionError(
+                "social_login approvals must be executed through the dedicated social login endpoint/tool with credentials"
+            )
         else:
             execution = await self.execute_decision(
                 approval.session_id,
@@ -679,11 +709,16 @@ class BrowserManager:
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await session.page.mouse.click(float(x), float(y))
+                await self._click_human_like(session, float(x), float(y))
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                await locator.click()
+                coords = await self._locator_center(locator)
+                if coords is None:
+                    await locator.click()
+                else:
+                    target["x"], target["y"] = coords
+                    await self._click_human_like(session, coords[0], coords[1])
             await self._settle(session.page)
 
         return await self._run_action(session, "click", target, operation)
@@ -702,11 +737,16 @@ class BrowserManager:
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await session.page.mouse.move(float(x), float(y))
+                await self._move_mouse_human_like(session, float(x), float(y))
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                await locator.hover()
+                coords = await self._locator_center(locator)
+                if coords is None:
+                    await locator.hover()
+                else:
+                    target["x"], target["y"] = coords
+                    await self._move_mouse_human_like(session, coords[0], coords[1])
             await self._settle(session.page)
 
         return await self._run_action(session, "hover", target, operation)
@@ -757,22 +797,13 @@ class BrowserManager:
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
             await locator.scroll_into_view_if_needed()
-            await locator.click()
-            await asyncio.sleep(0.05 + random.random() * 0.1)
+            await self._focus_locator(session, locator)
             if clear_first:
                 await session.page.keyboard.press("Control+a")
                 await asyncio.sleep(0.03)
                 await session.page.keyboard.press("Delete")
                 await asyncio.sleep(0.05)
-            for i, char in enumerate(text):
-                await session.page.keyboard.type(char)
-                delay_ms = random.randint(
-                    self.settings.human_typing_min_delay_ms,
-                    self.settings.human_typing_max_delay_ms,
-                )
-                if i > 0 and i % random.randint(6, 12) == 0:
-                    delay_ms += random.randint(200, 600)
-                await asyncio.sleep(delay_ms / 1000)
+            await self._type_text_human_like(session.page, text)
             await self._settle(session.page)
 
         return await self._run_action(
@@ -904,6 +935,10 @@ class BrowserManager:
         session = await self.get_session(session_id)
         return await session.page.evaluate(EXTRACT_PROFILE_SCRIPT)
 
+    async def extract_comments(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        session = await self.get_session(session_id)
+        return await session.page.evaluate(EXTRACT_COMMENTS_SCRIPT, limit)
+
     async def scroll_feed(self, session_id: str, direction: str = "down", screens: int = 3) -> dict[str, Any]:
         session = await self.get_session(session_id)
         delta = self.settings.default_viewport_height * screens
@@ -947,6 +982,801 @@ class BrowserManager:
 }
 """
 
+    async def _locator_center(self, locator: Any) -> tuple[float, float] | None:
+        try:
+            box = await locator.bounding_box()
+        except Exception:
+            return None
+        if not box:
+            return None
+        return (float(box["x"] + box["width"] / 2), float(box["y"] + box["height"] / 2))
+
+    async def _move_mouse_human_like(self, session: BrowserSession, x: float, y: float) -> None:
+        start = session.mouse_position
+        if start is None:
+            start = (
+                self.settings.default_viewport_width / 2 + random.randint(-120, 120),
+                self.settings.default_viewport_height / 2 + random.randint(-80, 80),
+            )
+            await session.page.mouse.move(start[0], start[1])
+            session.mouse_position = start
+
+        start_x, start_y = start
+        control_1 = (
+            start_x + (x - start_x) * random.uniform(0.2, 0.4) + random.randint(-80, 80),
+            start_y + (y - start_y) * random.uniform(0.1, 0.5) + random.randint(-80, 80),
+        )
+        control_2 = (
+            start_x + (x - start_x) * random.uniform(0.6, 0.85) + random.randint(-60, 60),
+            start_y + (y - start_y) * random.uniform(0.5, 0.9) + random.randint(-60, 60),
+        )
+        steps = random.randint(18, 34)
+        for step in range(1, steps + 1):
+            t = step / steps
+            inv = 1 - t
+            px = (
+                inv**3 * start_x
+                + 3 * inv * inv * t * control_1[0]
+                + 3 * inv * t * t * control_2[0]
+                + t**3 * x
+            )
+            py = (
+                inv**3 * start_y
+                + 3 * inv * inv * t * control_1[1]
+                + 3 * inv * t * t * control_2[1]
+                + t**3 * y
+            )
+            await session.page.mouse.move(px, py)
+            await asyncio.sleep(random.uniform(0.004, 0.018))
+        session.mouse_position = (x, y)
+
+    async def _click_human_like(self, session: BrowserSession, x: float, y: float) -> None:
+        jitter_x = x + random.uniform(-2.5, 2.5)
+        jitter_y = y + random.uniform(-2.5, 2.5)
+        await self._move_mouse_human_like(session, jitter_x, jitter_y)
+        await asyncio.sleep(random.uniform(0.03, 0.12))
+        await session.page.mouse.down()
+        await asyncio.sleep(random.uniform(0.02, 0.08))
+        await session.page.mouse.up()
+        session.mouse_position = (jitter_x, jitter_y)
+
+    async def _focus_locator(self, session: BrowserSession, locator: Any) -> None:
+        coords = await self._locator_center(locator)
+        if coords is None:
+            await locator.click()
+        else:
+            await self._click_human_like(session, coords[0], coords[1])
+        await asyncio.sleep(0.05 + random.random() * 0.1)
+
+    async def _type_text_human_like(self, page: Page, text: str) -> None:
+        for index, char in enumerate(text):
+            await page.keyboard.type(char)
+            delay_ms = random.randint(
+                self.settings.human_typing_min_delay_ms,
+                self.settings.human_typing_max_delay_ms,
+            )
+            if index > 0 and index % random.randint(6, 12) == 0:
+                delay_ms += random.randint(180, 600)
+            await asyncio.sleep(delay_ms / 1000)
+
+    async def _first_visible_locator(self, page: Page, selectors: list[str]) -> tuple[Any, str] | None:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    return locator, selector
+            except Exception:
+                continue
+        return None
+
+    async def _accessibility_locator(
+        self,
+        page: Page,
+        *,
+        roles: set[str],
+        include_keywords: list[str],
+        exclude_keywords: list[str] | None = None,
+        index: int = 0,
+    ) -> tuple[Any, dict[str, Any]] | None:
+        accessibility = getattr(page, "accessibility", None)
+        if accessibility is None or not hasattr(accessibility, "snapshot"):
+            return None
+        try:
+            snapshot = await accessibility.snapshot(interesting_only=True)
+        except Exception:
+            return None
+        if not snapshot:
+            return None
+
+        normalized_roles = {item.lower() for item in roles}
+        exclude = [item.lower() for item in (exclude_keywords or [])]
+        candidates: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def walk(node: dict[str, Any]) -> None:
+            role = str(node.get("role") or "").lower()
+            name = str(node.get("name") or "").strip()
+            if role in normalized_roles and name:
+                lowered = name.lower()
+                if any(keyword in lowered for keyword in include_keywords) and not any(
+                    keyword in lowered for keyword in exclude
+                ):
+                    key = (role, name)
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(key)
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    walk(child)
+
+        walk(snapshot)
+        remaining = index
+        for role, name in candidates:
+            locator = page.get_by_role(role, name=re.compile(re.escape(name), re.IGNORECASE))
+            try:
+                count = await locator.count()
+            except Exception:
+                continue
+            for offset in range(count):
+                candidate = locator.nth(offset)
+                try:
+                    if not await candidate.is_visible():
+                        continue
+                except Exception:
+                    continue
+                if remaining == 0:
+                    return candidate, {
+                        "mode": "accessibility",
+                        "accessibility_role": role,
+                        "accessibility_name": name,
+                    }
+                remaining -= 1
+        return None
+
+    async def _raise_social_action_error(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        code: str,
+        message: str,
+        retryable: bool,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        raise SocialActionError(
+            message,
+            action=action,
+            code=code,
+            retryable=retryable,
+            url=session.page.url,
+            details=details,
+        )
+
+    async def _check_rate_limit_signal(self, session: BrowserSession) -> dict[str, Any] | None:
+        phrases = [
+            "try again later",
+            "rate limit exceeded",
+            "too many requests",
+            "you are being rate limited",
+            "temporarily limited",
+            "please wait a few moments",
+        ]
+        try:
+            title = (await session.page.title()).lower()
+            body_text = (
+                await session.page.evaluate(
+                    "() => [document.body?.innerText || '', ...Array.from(document.querySelectorAll('[role=\"dialog\"], [aria-live]')).map((el) => el.innerText || '')].join(' ').slice(0, 4000)"
+                )
+            ).lower()
+        except Exception:
+            return None
+        combined = f"{session.page.url.lower()} {title} {body_text}"
+        for phrase in phrases:
+            if phrase in combined:
+                return {
+                    "signal": phrase,
+                    "url": session.page.url,
+                    "title": title,
+                }
+        return None
+
+    async def _maybe_handle_totp(self, session: BrowserSession) -> dict[str, Any] | None:
+        if not session.totp_secret:
+            return None
+        if pyotp is None:
+            await self._raise_social_action_error(
+                session,
+                action="social_login",
+                code="totp_unavailable",
+                message="TOTP support is not installed in this controller runtime",
+                retryable=False,
+            )
+        selectors = [
+            'input[autocomplete="one-time-code"]',
+            'input[inputmode="numeric"][maxlength="6"]',
+            'input[name*="otp" i]',
+            'input[name*="code" i]',
+            'input[id*="otp" i]',
+            'input[id*="code" i]',
+            'input[aria-label*="code" i]',
+            'input[placeholder*="code" i]',
+        ]
+        located = await self._first_visible_locator(session.page, selectors)
+        if located is None:
+            return None
+
+        locator, selector = located
+        code = pyotp.TOTP(session.totp_secret).now()
+        await self._focus_locator(session, locator)
+        try:
+            await locator.fill("")
+        except Exception:
+            await session.page.keyboard.press("Control+a")
+            await session.page.keyboard.press("Delete")
+        await self._type_text_human_like(session.page, code)
+        submit = await self._first_visible_locator(
+            session.page,
+            [
+                'button[type="submit"]',
+                '[aria-label*="verify" i][role="button"]',
+                'button:has-text("Verify")',
+                'button:has-text("Continue")',
+                'button:has-text("Next")',
+                'button:has-text("Submit")',
+            ],
+        )
+        if submit is not None:
+            coords = await self._locator_center(submit[0])
+            if coords is None:
+                await submit[0].click()
+            else:
+                await self._click_human_like(session, coords[0], coords[1])
+        await self._settle(session.page)
+        return {"selector": selector, "code_length": len(code)}
+
+    @staticmethod
+    def _platform_alias(platform: str) -> str:
+        normalized = platform.strip().lower()
+        if normalized == "twitter":
+            return "x"
+        return normalized
+
+    def _current_platform(self, session: BrowserSession) -> str | None:
+        host = (urlparse(session.page.url).hostname or "").lower()
+        if "x.com" in host or "twitter.com" in host:
+            return "x"
+        if "instagram.com" in host:
+            return "instagram"
+        if "linkedin.com" in host:
+            return "linkedin"
+        return None
+
+    async def _persist_platform_auth_state(self, session: BrowserSession, platform: str) -> dict[str, Any]:
+        safe_path = self._safe_session_auth_path(session, f"{self._platform_alias(platform)}-latest.json")
+        auth_info = await self.auth_state.write_storage_state(session.context, safe_path)
+        session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
+        await self.audit.append(
+            event_type="auth_state_saved",
+            status="ok",
+            action="save_storage_state",
+            session_id=session.id,
+            details={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"], "platform": platform},
+        )
+        return {
+            "saved_to": auth_info["path"],
+            "auth_state": auth_info,
+        }
+
+    async def _verify_post_submission(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        text: str,
+        composer_locator: Any,
+        initial_url: str,
+    ) -> dict[str, Any]:
+        snippet = text[:120].lower().strip()
+        for _ in range(20):
+            challenge = await self._check_bot_challenge(session)
+            if challenge is not None:
+                await self.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
+                await self._raise_social_action_error(
+                    session,
+                    action=action,
+                    code="captcha_detected",
+                    message=f"Human takeover required: {challenge['signal']}",
+                    retryable=False,
+                    details=challenge,
+                )
+
+            rate_limit = await self._check_rate_limit_signal(session)
+            if rate_limit is not None:
+                await self.request_human_takeover(session.id, reason=f"Rate limit detected: {rate_limit['signal']}")
+                await self._raise_social_action_error(
+                    session,
+                    action=action,
+                    code="rate_limited",
+                    message=f"Platform blocked the action: {rate_limit['signal']}",
+                    retryable=False,
+                    details=rate_limit,
+                )
+
+            success_toast = await self._first_visible_locator(
+                session.page,
+                [
+                    '[role="status"]',
+                    '[aria-live="polite"]',
+                    '[data-testid*="toast"]',
+                    '[data-testid*="confirmation"]',
+                ],
+            )
+            if success_toast is not None:
+                try:
+                    toast_text = (await success_toast[0].inner_text()).strip()
+                except Exception:
+                    toast_text = ""
+                lowered = toast_text.lower()
+                if any(token in lowered for token in ["sent", "posted", "published", "success"]):
+                    return {"verified": True, "signal": "success_toast", "detail": toast_text[:200]}
+
+            if session.page.url != initial_url:
+                return {"verified": True, "signal": "url_changed"}
+
+            composer_text = ""
+            try:
+                composer_text = (
+                    await composer_locator.evaluate(
+                        "(el) => ('value' in el ? el.value : (el.innerText || el.textContent || '')).trim()"
+                    )
+                ) or ""
+            except Exception:
+                composer_text = ""
+
+            if snippet and snippet not in composer_text.lower() and len(composer_text.strip()) < max(10, len(text) // 4):
+                return {"verified": True, "signal": "composer_cleared"}
+
+            body_text = (
+                await session.page.evaluate(
+                    "() => [document.body?.innerText || '', ...Array.from(document.querySelectorAll('[role=\"dialog\"], [aria-live]')).map((el) => el.innerText || '')].join(' ').slice(0, 6000)"
+                )
+            ).lower()
+            if "character limit" in body_text or "too long" in body_text or "could not send" in body_text:
+                await self._raise_social_action_error(
+                    session,
+                    action=action,
+                    code="post_rejected",
+                    message="Platform rejected the post after submit",
+                    retryable=True,
+                    details={"current_url": session.page.url},
+                )
+            if snippet and snippet in body_text and snippet not in composer_text.lower():
+                return {"verified": True, "signal": "posted_text_visible"}
+
+            await asyncio.sleep(0.35)
+
+        await self._raise_social_action_error(
+            session,
+            action=action,
+            code="post_unverified",
+            message="The post was submitted but success could not be verified",
+            retryable=True,
+            details={"initial_url": initial_url, "current_url": session.page.url},
+        )
+
+
+    async def _interactable_keyword_target(
+        self,
+        session: BrowserSession,
+        *,
+        include_keywords: list[str],
+        exclude_keywords: list[str] | None = None,
+        tags: set[str] | None = None,
+        index: int = 0,
+    ) -> dict[str, Any] | None:
+        include = [item.lower() for item in include_keywords]
+        exclude = [item.lower() for item in (exclude_keywords or [])]
+        interactables = await session.page.evaluate(INTERACTABLES_SCRIPT, 120)
+        matches: list[dict[str, Any]] = []
+        for item in interactables:
+            label = str(item.get("label") or "").lower()
+            tag = str(item.get("tag") or "").lower()
+            role = str(item.get("role") or "").lower()
+            if tags and tag not in tags and role not in tags:
+                continue
+            if not any(keyword in label for keyword in include):
+                continue
+            if any(keyword in label for keyword in exclude):
+                continue
+            bbox = item.get("bbox") or {}
+            matches.append(
+                {
+                    "mode": "selector",
+                    "selector": item.get("selector_hint"),
+                    "element_id": item.get("element_id"),
+                    "label": item.get("label"),
+                    "x": float((bbox.get("x") or 0) + (bbox.get("width") or 0) / 2),
+                    "y": float((bbox.get("y") or 0) + (bbox.get("height") or 0) / 2),
+                    "matched_via": "interactables",
+                }
+            )
+        if index < len(matches):
+            return matches[index]
+        return None
+
+    async def _resolve_text_locator(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        selectors: list[str],
+        accessibility_keywords: list[str],
+        accessibility_roles: set[str] | None = None,
+        error_code: str,
+        error_message: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        filtered_selectors = [selector for selector in selectors if selector]
+        located = await self._first_visible_locator(session.page, filtered_selectors)
+        if located is not None:
+            locator, selector = located
+            target: dict[str, Any] = {"mode": "selector", "selector": selector}
+            coords = await self._locator_center(locator)
+            if coords is not None:
+                target["x"], target["y"] = coords
+            return locator, target
+
+        accessibility = await self._accessibility_locator(
+            session.page,
+            roles=accessibility_roles or {"textbox", "searchbox", "combobox"},
+            include_keywords=accessibility_keywords,
+        )
+        if accessibility is not None:
+            locator, details = accessibility
+            target = {"mode": "accessibility", **details}
+            coords = await self._locator_center(locator)
+            if coords is not None:
+                target["x"], target["y"] = coords
+            return locator, target
+
+        interactable_target = await self._interactable_keyword_target(
+            session,
+            include_keywords=accessibility_keywords,
+            tags={"textarea", "input", "textbox", "searchbox"},
+        )
+        if interactable_target is not None and interactable_target.get("selector"):
+            locator = session.page.locator(str(interactable_target["selector"])).first
+            return locator, interactable_target
+
+        await self._raise_social_action_error(
+            session,
+            action=action,
+            code=error_code,
+            message=error_message,
+            retryable=True,
+            details={"keywords": accessibility_keywords},
+        )
+
+    async def _resolve_button_target(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        primary_script: str | None,
+        primary_arg: Any = None,
+        include_keywords: list[str],
+        exclude_keywords: list[str] | None = None,
+        index: int = 0,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        match = None
+        if primary_script:
+            try:
+                if primary_arg is None:
+                    match = await session.page.evaluate(primary_script)
+                else:
+                    match = await session.page.evaluate(primary_script, primary_arg)
+            except Exception:
+                match = None
+        if isinstance(match, dict) and match:
+            return {
+                "mode": "coordinates",
+                **match,
+            }
+
+        interactable_target = await self._interactable_keyword_target(
+            session,
+            include_keywords=include_keywords,
+            exclude_keywords=exclude_keywords,
+            tags={"button", "link"},
+            index=index,
+        )
+        if interactable_target is not None:
+            return interactable_target
+
+        accessibility = await self._accessibility_locator(
+            session.page,
+            roles={"button", "link", "menuitem"},
+            include_keywords=include_keywords,
+            exclude_keywords=exclude_keywords,
+            index=index,
+        )
+        if accessibility is not None:
+            locator, details = accessibility
+            target = {"mode": "accessibility", **details}
+            coords = await self._locator_center(locator)
+            if coords is not None:
+                target["x"], target["y"] = coords
+                return target
+
+        await self._raise_social_action_error(
+            session,
+            action=action,
+            code=error_code,
+            message=error_message,
+            retryable=True,
+            details={"keywords": include_keywords, "exclude_keywords": exclude_keywords or []},
+        )
+
+    async def _click_target_payload(self, session: BrowserSession, target: dict[str, Any]) -> None:
+        selector = target.get("selector")
+        if selector:
+            locator = session.page.locator(str(selector)).first
+            await locator.scroll_into_view_if_needed()
+            coords = await self._locator_center(locator)
+            if coords is None:
+                await locator.click()
+                return
+            target["x"], target["y"] = coords
+            await self._click_human_like(session, coords[0], coords[1])
+            return
+        if target.get("x") is not None and target.get("y") is not None:
+            await self._click_human_like(session, float(target["x"]), float(target["y"]))
+            return
+        await self._raise_social_action_error(
+            session,
+            action=str(target.get("action") or "social_click"),
+            code="target_unusable",
+            message="Resolved social target could not be clicked",
+            retryable=True,
+            details={"target": target},
+        )
+
+    async def _resolve_composer_locator(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        selector = None
+        try:
+            selector = await session.page.evaluate(self._FIND_COMPOSER_SCRIPT)
+        except Exception:
+            selector = None
+        selectors = [
+            *([selector] if selector else []),
+            '[aria-label*="message" i][contenteditable]',
+            '[placeholder*="message" i]',
+            'div[role="textbox"][contenteditable="true"]',
+            'div[contenteditable="true"]',
+            'textarea',
+            'input[type="text"]',
+        ]
+        return await self._resolve_text_locator(
+            session,
+            action=action,
+            selectors=selectors,
+            accessibility_keywords=["post", "tweet", "share", "write", "reply", "comment", "message"],
+            error_code="composer_missing",
+            error_message="No composer was found on the current page",
+        )
+
+    async def _resolve_search_locator(self, session: BrowserSession) -> tuple[Any, dict[str, Any]]:
+        selector = None
+        try:
+            selector = await session.page.evaluate(FIND_SEARCH_INPUT_SCRIPT)
+        except Exception:
+            selector = None
+        selectors = [
+            *([selector] if selector else []),
+            'input[type="search"]',
+            'input[role="searchbox"]',
+            '[role="searchbox"]',
+            '[aria-label*="search" i]',
+            '[placeholder*="search" i]',
+        ]
+        return await self._resolve_text_locator(
+            session,
+            action="search_page",
+            selectors=selectors,
+            accessibility_keywords=["search"],
+            accessibility_roles={"searchbox", "textbox", "combobox"},
+            error_code="search_input_missing",
+            error_message="No search input found on the current page",
+        )
+
+    def _platform_login_config(self, platform: str) -> dict[str, Any]:
+        if platform == "x":
+            return {
+                "login_url": "https://x.com/i/flow/login",
+                "username_selectors": [
+                    'input[autocomplete="username"]',
+                    'input[name="text"]',
+                    'input[name="session[username_or_email]"]',
+                ],
+                "username_continue_selectors": [
+                    'button:has-text("Next")',
+                    'button:has-text("Continue")',
+                ],
+                "password_selectors": [
+                    'input[name="password"]',
+                    'input[type="password"]',
+                ],
+                "submit_selectors": [
+                    '[data-testid="LoginForm_Login_Button"]',
+                    'button[type="submit"]',
+                    'button:has-text("Log in")',
+                ],
+                "login_url_tokens": ["/login", "/i/flow/login"],
+                "success_selectors": [
+                    '[data-testid="SideNav_AccountSwitcher_Button"]',
+                    '[aria-label*="Profile" i]',
+                    'a[href="/home"]',
+                ],
+            }
+        if platform == "instagram":
+            return {
+                "login_url": "https://www.instagram.com/accounts/login/",
+                "username_selectors": ['input[name="username"]', 'input[autocomplete="username"]'],
+                "username_continue_selectors": [],
+                "password_selectors": ['input[name="password"]', 'input[type="password"]'],
+                "submit_selectors": ['button[type="submit"]', 'button:has-text("Log in")'],
+                "login_url_tokens": ["/accounts/login"],
+                "success_selectors": [
+                    'svg[aria-label="Home"]',
+                    'a[href="/direct/inbox/"]',
+                    'a[href="/accounts/edit/"]',
+                ],
+            }
+        if platform == "linkedin":
+            return {
+                "login_url": "https://www.linkedin.com/login",
+                "username_selectors": ['#username', 'input[name="session_key"]', 'input[autocomplete="username"]'],
+                "username_continue_selectors": [],
+                "password_selectors": ['#password', 'input[name="session_password"]', 'input[type="password"]'],
+                "submit_selectors": ['button[type="submit"]', 'button:has-text("Sign in")'],
+                "login_url_tokens": ["/login", "/checkpoint"],
+                "success_selectors": [
+                    'a[href*="/feed/"]',
+                    'button[aria-label*="Account" i]',
+                    'img.global-nav__me-photo',
+                ],
+            }
+        raise ValueError(f"Unsupported social platform: {platform}")
+
+    def _platform_dm_compose_url(self, platform: str) -> str:
+        if platform == "x":
+            return "https://x.com/messages/compose"
+        if platform == "instagram":
+            return "https://www.instagram.com/direct/new/"
+        if platform == "linkedin":
+            return "https://www.linkedin.com/messaging/compose/"
+        raise ValueError(f"Unsupported social platform: {platform}")
+
+    async def social_login(
+        self,
+        session_id: str,
+        *,
+        platform: str,
+        username: str,
+        password: str,
+        approval_id: str | None = None,
+        totp_secret: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        platform_alias = self._platform_alias(platform)
+        if totp_secret:
+            session.totp_secret = totp_secret
+
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="social_login",
+                reason=f"Log into {platform_alias} as {username}",
+                platform=platform_alias,
+                username=username,
+                risk_category="account_change",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Logging into a social account requires approval",
+        )
+        target: dict[str, Any] = {"platform": platform_alias, "username": username}
+        login_config = self._platform_login_config(platform_alias)
+        auth_state_payload: dict[str, Any] = {}
+        totp_used: dict[str, Any] | None = None
+
+        async def operation() -> None:
+            nonlocal totp_used
+            if not any(token in session.page.url for token in login_config["login_url_tokens"]):
+                await session.page.goto(login_config["login_url"], wait_until="domcontentloaded")
+                await self._settle(session.page)
+
+            username_locator, username_target = await self._resolve_text_locator(
+                session,
+                action="social_login",
+                selectors=login_config["username_selectors"],
+                accessibility_keywords=["email", "username", "phone"],
+                error_code="login_username_missing",
+                error_message="Could not find the login username field",
+            )
+            target.setdefault("username_target", username_target)
+            await self._focus_locator(session, username_locator)
+            await self._clear_focused_input(session, username_locator)
+            await self._type_text_human_like(session.page, username)
+            await self._settle(session.page)
+
+            password_visible = await self._first_visible_locator(session.page, login_config["password_selectors"])
+            if password_visible is None and login_config["username_continue_selectors"]:
+                await self._submit_visible_button(
+                    session,
+                    action="social_login",
+                    selectors=login_config["username_continue_selectors"],
+                )
+                await self._settle(session.page)
+
+            password_locator, password_target = await self._resolve_text_locator(
+                session,
+                action="social_login",
+                selectors=login_config["password_selectors"],
+                accessibility_keywords=["password"],
+                error_code="login_password_missing",
+                error_message="Could not find the login password field",
+            )
+            target.setdefault("password_target", password_target)
+            await self._focus_locator(session, password_locator)
+            await self._clear_focused_input(session, password_locator)
+            await self._type_text_human_like(session.page, password)
+            await self._submit_visible_button(
+                session,
+                action="social_login",
+                selectors=login_config["submit_selectors"],
+            )
+            await self._settle(session.page)
+
+            totp_used = await self._maybe_handle_totp(session)
+
+            for _ in range(20):
+                await self._ensure_no_social_interlock(session, action="social_login")
+                success = await self._first_visible_locator(session.page, login_config.get("success_selectors", []))
+                if success is not None:
+                    target["success_selector"] = success[1]
+                    break
+                password_field = await self._first_visible_locator(session.page, login_config["password_selectors"])
+                username_field = await self._first_visible_locator(session.page, login_config["username_selectors"])
+                if password_field is None and username_field is None and not any(
+                    token in session.page.url for token in login_config["login_url_tokens"]
+                ):
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                await self._raise_social_action_error(
+                    session,
+                    action="social_login",
+                    code="login_unverified",
+                    message="Login completed but success could not be verified",
+                    retryable=True,
+                    details={"platform": platform_alias, "current_url": session.page.url},
+                )
+
+            auth_state_payload.update(await self._persist_platform_auth_state(session, platform_alias))
+
+        result = await self._run_action(session, "social_login", target, operation)
+        result["auth_state"] = auth_state_payload
+        result["totp_used"] = totp_used
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
     async def post_content(
         self,
         session_id: str,
@@ -954,12 +1784,7 @@ class BrowserManager:
         *,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
-        """Find a text composer on the current page and type + submit the post."""
         session = await self.get_session(session_id)
-        composer_sel = await session.page.evaluate(self._FIND_COMPOSER_SCRIPT)
-        if not composer_sel:
-            return {"ok": False, "error": "No composer found on current page", "url": session.page.url}
-
         approval = await self._require_decision_approval(
             session_id,
             BrowserActionDecision(
@@ -971,57 +1796,131 @@ class BrowserManager:
             approval_id=approval_id,
             fallback_reason="Publishing a social post requires approval",
         )
-        target: dict[str, Any] = {"selector": composer_sel, "text_preview": text[:160]}
+        locator, target = await self._resolve_composer_locator(session, action="social_post")
+        target["text_preview"] = text[:160]
+        initial_url = session.page.url
+        delivery: dict[str, Any] = {}
 
         async def operation() -> None:
-            locator = session.page.locator(composer_sel).first
             await locator.scroll_into_view_if_needed()
-            await locator.click()
-            await asyncio.sleep(0.2 + random.random() * 0.15)
+            await self._focus_locator(session, locator)
             try:
                 await locator.fill("")
             except Exception:
-                await session.page.keyboard.press("Control+A")
-                await asyncio.sleep(0.03)
+                await session.page.keyboard.press("Control+a")
                 await session.page.keyboard.press("Delete")
-
-            for i, char in enumerate(text):
-                await session.page.keyboard.type(char)
-                delay_ms = random.randint(
-                    self.settings.human_typing_min_delay_ms,
-                    self.settings.human_typing_max_delay_ms,
+            await self._type_text_human_like(session.page, text)
+            await asyncio.sleep(0.25 + random.random() * 0.25)
+            target["submit_selector"] = await self._submit_visible_button(
+                session,
+                action="social_post",
+                selectors=[
+                    '[data-testid="tweetButtonInline"]',
+                    '[data-testid="tweetButton"]',
+                    'button[type="submit"]',
+                    '[aria-label*="post" i][role="button"]',
+                    '[aria-label*="tweet" i][role="button"]',
+                    '[aria-label*="share" i][role="button"]',
+                    'button:has-text("Post")',
+                    'button:has-text("Tweet")',
+                    'button:has-text("Share")',
+                    'button:has-text("Submit")',
+                ],
+            )
+            await self._settle(session.page)
+            delivery.update(
+                await self._verify_post_submission(
+                    session,
+                    action="social_post",
+                    text=text,
+                    composer_locator=locator,
+                    initial_url=initial_url,
                 )
-                if i > 0 and i % random.randint(6, 12) == 0:
-                    delay_ms += random.randint(150, 500)
-                await asyncio.sleep(delay_ms / 1000)
-
-            await asyncio.sleep(0.4 + random.random() * 0.3)
-
-            submit_selectors = [
-                '[data-testid="tweetButtonInline"]',
-                '[data-testid="tweetButton"]',
-                'button[type="submit"]',
-                '[aria-label*="post" i][role="button"]',
-                '[aria-label*="tweet" i][role="button"]',
-                '[aria-label*="share" i][role="button"]',
-                'button:has-text("Post")',
-                'button:has-text("Tweet")',
-                'button:has-text("Share")',
-                'button:has-text("Submit")',
-            ]
-            for sel in submit_selectors:
-                try:
-                    btn = session.page.locator(sel).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        target["submit_selector"] = sel
-                        await btn.click()
-                        await self._settle(session.page)
-                        return
-                except Exception:
-                    continue
-            raise PlaywrightError("No submit button found on current page")
+            )
 
         result = await self._run_action(session, "social_post", target, operation)
+        result["delivery"] = delivery or {
+            "verified": False,
+            "signal": "unknown",
+        }
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
+    async def comment_on_post(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        post_index: int = 0,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="social_comment",
+                reason="Comment on the selected social post",
+                text=text,
+                index=post_index,
+                risk_category="post",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Commenting on a post requires approval",
+        )
+        target = await self._resolve_button_target(
+            session,
+            action="social_comment",
+            primary_script=FIND_REPLY_BUTTON_SCRIPT,
+            primary_arg=post_index,
+            include_keywords=["reply", "comment"],
+            error_code="reply_button_missing",
+            error_message="No reply or comment button was found on the current page",
+        )
+        target["post_index"] = post_index
+        target["text_preview"] = text[:160]
+        initial_url = session.page.url
+        delivery: dict[str, Any] = {}
+
+        async def operation() -> None:
+            await self._click_target_payload(session, target)
+            await self._settle(session.page)
+            composer_locator, composer_target = await self._resolve_composer_locator(session, action="social_comment")
+            target["composer"] = composer_target
+            await self._focus_locator(session, composer_locator)
+            try:
+                await composer_locator.fill("")
+            except Exception:
+                await session.page.keyboard.press("Control+a")
+                await session.page.keyboard.press("Delete")
+            await self._type_text_human_like(session.page, text)
+            target["submit_selector"] = await self._submit_visible_button(
+                session,
+                action="social_comment",
+                selectors=[
+                    '[data-testid="tweetButton"]',
+                    'button[type="submit"]',
+                    '[aria-label*="reply" i][role="button"]',
+                    '[aria-label*="comment" i][role="button"]',
+                    'button:has-text("Reply")',
+                    'button:has-text("Comment")',
+                    'button:has-text("Post")',
+                    'button:has-text("Send")',
+                ],
+            )
+            await self._settle(session.page)
+            delivery.update(
+                await self._verify_post_submission(
+                    session,
+                    action="social_comment",
+                    text=text,
+                    composer_locator=composer_locator,
+                    initial_url=initial_url,
+                )
+            )
+
+        result = await self._run_action(session, "social_comment", target, operation)
+        result["delivery"] = delivery or {"verified": False, "signal": "unknown"}
         if approval is not None:
             await self.approvals.mark_executed(approval.id)
         return result
@@ -1033,12 +1932,18 @@ class BrowserManager:
         *,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
-        """Find and click the like/heart button for a visible post."""
         session = await self.get_session(session_id)
-        match = await session.page.evaluate(FIND_LIKE_BUTTON_SCRIPT, post_index)
-        if not match:
-            return {"ok": False, "error": "No like button found on current page", "url": session.page.url}
-
+        target = await self._resolve_button_target(
+            session,
+            action="social_like",
+            primary_script=FIND_LIKE_BUTTON_SCRIPT,
+            primary_arg=post_index,
+            include_keywords=["like", "heart", "love"],
+            exclude_keywords=["liked"],
+            index=post_index,
+            error_code="like_button_missing",
+            error_message="No like button was found on the current page",
+        )
         approval = await self._require_decision_approval(
             session_id,
             BrowserActionDecision(
@@ -1050,17 +1955,14 @@ class BrowserManager:
             approval_id=approval_id,
             fallback_reason="Liking a post requires approval",
         )
-        target: dict[str, Any] = {**match, "post_index": post_index}
+        target["post_index"] = post_index
 
         async def operation() -> None:
-            await asyncio.sleep(0.1 + random.random() * 0.15)
-            await session.page.mouse.click(
-                match["x"] + random.randint(-2, 2),
-                match["y"] + random.randint(-2, 2),
-            )
+            await asyncio.sleep(0.08 + random.random() * 0.12)
+            await self._click_target_payload(session, target)
             await self._settle(session.page)
 
-        result = await self._run_action(session, "like_post", target, operation)
+        result = await self._run_action(session, "social_like", target, operation)
         if approval is not None:
             await self.approvals.mark_executed(approval.id)
         return result
@@ -1071,12 +1973,16 @@ class BrowserManager:
         *,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
-        """Find and click the Follow button on the current profile page."""
         session = await self.get_session(session_id)
-        match = await session.page.evaluate(FIND_FOLLOW_BUTTON_SCRIPT)
-        if not match:
-            return {"ok": False, "error": "No follow button found — may already be following", "url": session.page.url}
-
+        target = await self._resolve_button_target(
+            session,
+            action="social_follow",
+            primary_script=FIND_FOLLOW_BUTTON_SCRIPT,
+            include_keywords=["follow"],
+            exclude_keywords=["unfollow", "following"],
+            error_code="follow_button_missing",
+            error_message="No follow button was found on the current page",
+        )
         approval = await self._require_decision_approval(
             session_id,
             BrowserActionDecision(
@@ -1089,38 +1995,241 @@ class BrowserManager:
         )
 
         async def operation() -> None:
-            await asyncio.sleep(0.15 + random.random() * 0.2)
-            await session.page.mouse.click(
-                match["x"] + random.randint(-2, 2),
-                match["y"] + random.randint(-2, 2),
-            )
+            await asyncio.sleep(0.08 + random.random() * 0.12)
+            await self._click_target_payload(session, target)
             await self._settle(session.page)
 
-        result = await self._run_action(session, "follow_user", match, operation)
+        result = await self._run_action(session, "social_follow", target, operation)
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
+    async def unfollow_user(
+        self,
+        session_id: str,
+        *,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        target = await self._resolve_button_target(
+            session,
+            action="social_unfollow",
+            primary_script=FIND_UNFOLLOW_BUTTON_SCRIPT,
+            include_keywords=["following", "unfollow"],
+            error_code="unfollow_button_missing",
+            error_message="No following or unfollow button was found on the current page",
+        )
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="social_unfollow",
+                reason="Unfollow the current social profile",
+                risk_category="post",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Unfollowing an account requires approval",
+        )
+
+        async def operation() -> None:
+            await self._click_target_payload(session, target)
+            await self._settle(session.page)
+            confirm = await self._first_visible_locator(
+                session.page,
+                [
+                    '[data-testid="confirmationSheetConfirm"]',
+                    'button:has-text("Unfollow")',
+                    '[role="menuitem"]:has-text("Unfollow")',
+                ],
+            )
+            if confirm is not None:
+                coords = await self._locator_center(confirm[0])
+                if coords is None:
+                    await confirm[0].click()
+                else:
+                    await self._click_human_like(session, coords[0], coords[1])
+                await self._settle(session.page)
+
+        result = await self._run_action(session, "social_unfollow", target, operation)
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
+    async def repost_post(
+        self,
+        session_id: str,
+        post_index: int = 0,
+        *,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        target = await self._resolve_button_target(
+            session,
+            action="social_repost",
+            primary_script=FIND_REPOST_BUTTON_SCRIPT,
+            primary_arg=post_index,
+            include_keywords=["repost", "retweet"],
+            error_code="repost_button_missing",
+            error_message="No repost or retweet button was found on the current page",
+        )
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="social_repost",
+                reason="Repost the selected social post",
+                index=post_index,
+                risk_category="post",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Reposting a post requires approval",
+        )
+        target["post_index"] = post_index
+
+        async def operation() -> None:
+            await self._click_target_payload(session, target)
+            await self._settle(session.page)
+            confirm = await self._first_visible_locator(
+                session.page,
+                [
+                    '[data-testid="retweetConfirm"]',
+                    'button:has-text("Repost")',
+                    'button:has-text("Retweet")',
+                    '[role="menuitem"]:has-text("Repost")',
+                    '[role="menuitem"]:has-text("Retweet")',
+                ],
+            )
+            if confirm is not None:
+                coords = await self._locator_center(confirm[0])
+                if coords is None:
+                    await confirm[0].click()
+                else:
+                    await self._click_human_like(session, coords[0], coords[1])
+                await self._settle(session.page)
+
+        result = await self._run_action(session, "social_repost", target, operation)
+        if approval is not None:
+            await self.approvals.mark_executed(approval.id)
+        return result
+
+    async def send_direct_message(
+        self,
+        session_id: str,
+        *,
+        recipient: str,
+        text: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        platform = self._current_platform(session)
+        if platform is None:
+            await self._raise_social_action_error(
+                session,
+                action="social_dm",
+                code="unsupported_platform",
+                message="Direct messages are only implemented for X, Instagram, and LinkedIn",
+                retryable=False,
+                details={"url": session.page.url},
+            )
+        approval = await self._require_decision_approval(
+            session_id,
+            BrowserActionDecision(
+                action="social_dm",
+                reason=f"Send a direct message to {recipient}",
+                recipient=recipient,
+                text=text,
+                risk_category="post",
+            ),
+            approval_id=approval_id,
+            fallback_reason="Sending a direct message requires approval",
+        )
+        target: dict[str, Any] = {"platform": platform, "recipient": recipient, "text_preview": text[:160]}
+        compose_url = self._platform_dm_compose_url(platform)
+        delivery: dict[str, Any] = {}
+
+        async def operation() -> None:
+            if session.page.url != compose_url:
+                await session.page.goto(compose_url, wait_until="domcontentloaded")
+                await self._settle(session.page)
+            recipient_locator, recipient_target = await self._resolve_text_locator(
+                session,
+                action="social_dm",
+                selectors=[
+                    'input[role="combobox"]',
+                    'input[placeholder*="search" i]',
+                    'input[placeholder*="name" i]',
+                    'input[aria-label*="search" i]',
+                ],
+                accessibility_keywords=["search", "name", "recipient", "to"],
+                error_code="dm_recipient_missing",
+                error_message="Could not find the DM recipient field",
+            )
+            target["recipient_target"] = recipient_target
+            await self._focus_locator(session, recipient_locator)
+            try:
+                await recipient_locator.fill("")
+            except Exception:
+                await session.page.keyboard.press("Control+a")
+                await session.page.keyboard.press("Delete")
+            await self._type_text_human_like(session.page, recipient)
+            await asyncio.sleep(0.5)
+            await session.page.keyboard.press("Enter")
+            await self._settle(session.page)
+            message_locator, message_target = await self._resolve_text_locator(
+                session,
+                action="social_dm",
+                selectors=[
+                    'div[contenteditable="true"][role="textbox"]',
+                    '[aria-label*="message" i][contenteditable="true"]',
+                    'textarea[placeholder*="message" i]',
+                    'textarea',
+                ],
+                accessibility_keywords=["message", "reply", "compose"],
+                error_code="dm_composer_missing",
+                error_message="Could not find the DM message composer",
+            )
+            target["composer"] = message_target
+            await self._focus_locator(session, message_locator)
+            try:
+                await message_locator.fill("")
+            except Exception:
+                await session.page.keyboard.press("Control+a")
+                await session.page.keyboard.press("Delete")
+            await self._type_text_human_like(session.page, text)
+            target["submit_selector"] = await self._submit_visible_button(
+                session,
+                action="social_dm",
+                selectors=[
+                    '[data-testid="dmComposerSendButton"]',
+                    'button[type="submit"]',
+                    '[aria-label*="send" i][role="button"]',
+                    'button:has-text("Send")',
+                ],
+            )
+            await self._settle(session.page)
+            delivery.update(
+                await self._verify_post_submission(
+                    session,
+                    action="social_dm",
+                    text=text,
+                    composer_locator=message_locator,
+                    initial_url=compose_url,
+                )
+            )
+
+        result = await self._run_action(session, "social_dm", target, operation)
+        result["delivery"] = delivery or {"verified": False, "signal": "unknown"}
         if approval is not None:
             await self.approvals.mark_executed(approval.id)
         return result
 
     async def search_page(self, session_id: str, query: str) -> dict[str, Any]:
-        """Find the search input on the current page and type a query."""
         session = await self.get_session(session_id)
-        search_sel = await session.page.evaluate(FIND_SEARCH_INPUT_SCRIPT)
-        if not search_sel:
-            return {"ok": False, "error": "No search input found on current page", "url": session.page.url}
-        target: dict[str, Any] = {"query": query, "selector": search_sel}
+        locator, target = await self._resolve_search_locator(session)
+        target["query"] = query
 
         async def operation() -> None:
-            locator = session.page.locator(search_sel).first
-            await locator.click()
-            await asyncio.sleep(0.1 + random.random() * 0.1)
+            await self._focus_locator(session, locator)
             await session.page.keyboard.press("Control+A")
-            for char in query:
-                await session.page.keyboard.type(char)
-                delay_ms = random.randint(
-                    self.settings.human_typing_min_delay_ms,
-                    self.settings.human_typing_max_delay_ms,
-                )
-                await asyncio.sleep(delay_ms / 1000)
+            await self._type_text_human_like(session.page, query)
             await asyncio.sleep(0.2 + random.random() * 0.15)
             await session.page.keyboard.press("Enter")
             await self._settle(session.page)
@@ -1136,10 +2245,30 @@ class BrowserManager:
     ) -> dict[str, Any]:
         if decision.action == "social_post":
             return await self.post_content(session_id, decision.text or "", approval_id=approval_id)
+        if decision.action == "social_comment":
+            return await self.comment_on_post(
+                session_id,
+                text=decision.text or "",
+                post_index=decision.index or 0,
+                approval_id=approval_id,
+            )
         if decision.action == "social_like":
             return await self.like_post(session_id, post_index=decision.index or 0, approval_id=approval_id)
         if decision.action == "social_follow":
             return await self.follow_user(session_id, approval_id=approval_id)
+        if decision.action == "social_unfollow":
+            return await self.unfollow_user(session_id, approval_id=approval_id)
+        if decision.action == "social_repost":
+            return await self.repost_post(session_id, post_index=decision.index or 0, approval_id=approval_id)
+        if decision.action == "social_dm":
+            return await self.send_direct_message(
+                session_id,
+                recipient=decision.recipient or "",
+                text=decision.text or "",
+                approval_id=approval_id,
+            )
+        if decision.action == "social_login":
+            raise ValueError("Use the dedicated social login endpoint/tool with credentials and optional approval_id")
 
         approval = await self._require_decision_approval(
             session_id,
@@ -1212,6 +2341,7 @@ class BrowserManager:
         return result
 
     async def upload(
+
         self,
         session_id: str,
         *,
@@ -1401,7 +2531,33 @@ class BrowserManager:
             before = await self._light_snapshot(session, label=f"before-{action_name}")
             try:
                 await operation()
+                totp_result = await self._maybe_handle_totp(session)
+                if totp_result is not None:
+                    target.setdefault("totp", totp_result)
                 self._assert_runtime_url_allowed(session.page.url)
+                challenge = await self._check_bot_challenge(session)
+                if challenge is not None:
+                    await self.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
+                    raise SocialActionError(
+                        f"Bot challenge detected: {challenge['signal']}",
+                        action=action_name,
+                        code="captcha_detected",
+                        retryable=False,
+                        url=session.page.url,
+                        details=challenge,
+                    )
+                if action_name.startswith("social_") or action_name in {"like_post", "follow_user", "search_page"}:
+                    rate_limit = await self._check_rate_limit_signal(session)
+                    if rate_limit is not None:
+                        await self.request_human_takeover(session.id, reason=f"Rate limit detected: {rate_limit['signal']}")
+                        raise SocialActionError(
+                            f"Platform blocked the action: {rate_limit['signal']}",
+                            action=action_name,
+                            code="rate_limited",
+                            retryable=False,
+                            url=session.page.url,
+                            details=rate_limit,
+                        )
             except PermissionError as exc:
                 try:
                     if session.page.url != before.get("url"):
@@ -1428,6 +2584,28 @@ class BrowserManager:
                     action=action_name,
                     session_id=session.id,
                     details={"target": target, "error": str(exc)},
+                )
+                raise
+            except SocialActionError as exc:
+                failed = await self._light_snapshot(session, label=f"failed-{action_name}")
+                await self._append_jsonl(
+                    session.artifact_dir / "actions.jsonl",
+                    {
+                        "timestamp": self._timestamp(),
+                        "action": action_name,
+                        "status": "failed",
+                        "target": target,
+                        "before": before,
+                        "after": failed,
+                        "error": exc.payload,
+                    },
+                )
+                await self.audit.append(
+                    event_type="browser_action",
+                    status="failed",
+                    action=action_name,
+                    session_id=session.id,
+                    details={"target": target, "error": exc.payload},
                 )
                 raise
             except PlaywrightError as exc:
@@ -1459,6 +2637,28 @@ class BrowserManager:
                 raise ValueError(
                     f"Action failed for {action_name}. Refresh observation and retry. Details: {exc}"
                 ) from exc
+            except SocialActionError as exc:
+                failed = await self._light_snapshot(session, label=f"failed-{action_name}")
+                await self._append_jsonl(
+                    session.artifact_dir / "actions.jsonl",
+                    {
+                        "timestamp": self._timestamp(),
+                        "action": action_name,
+                        "status": "failed",
+                        "target": target,
+                        "before": before,
+                        "after": failed,
+                        "error": exc.payload,
+                    },
+                )
+                await self.audit.append(
+                    event_type="browser_action",
+                    status="failed",
+                    action=action_name,
+                    session_id=session.id,
+                    details={"target": target, "error": exc.payload},
+                )
+                raise
             after = await self._observation_payload(session, limit=20, screenshot_label=f"after-{action_name}")
             session.last_action = action_name
             verification = self._action_verification(action_name, target, before, after)
@@ -1514,13 +2714,22 @@ class BrowserManager:
         url = session.page.url.lower()
         title = ""
         body_text = ""
+        iframe_sources: list[str] = []
         try:
             title = (await session.page.title()).lower()
             body_text = (await session.page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")).lower()
+            iframe_sources = [
+                item.lower()
+                for item in (
+                    await session.page.evaluate(
+                        "() => Array.from(document.querySelectorAll('iframe')).map((el) => el.src || el.getAttribute('src') || '')"
+                    )
+                )
+            ]
         except Exception:
             pass
 
-        combined = f"{url} {title} {body_text}"
+        combined = f"{url} {title} {body_text} {' '.join(iframe_sources)}"
         for signal in self._BOT_CHALLENGE_SIGNALS:
             if signal in combined:
                 return {
@@ -1528,6 +2737,7 @@ class BrowserManager:
                     "signal": signal,
                     "url": session.page.url,
                     "title": title,
+                    "iframes": iframe_sources[:10],
                 }
         return None
 
@@ -1749,7 +2959,18 @@ class BrowserManager:
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {"go_back", "go_forward"}:
             verified = "url_changed" in signals or "title_changed" in signals
-        elif action_name in {"click", "press", "scroll", "scroll_feed", "like_post", "follow_user"}:
+        elif action_name in {
+            "click",
+            "press",
+            "scroll",
+            "scroll_feed",
+            "like_post",
+            "follow_user",
+            "social_like",
+            "social_follow",
+            "social_repost",
+            "social_unfollow",
+        }:
             verified = bool(
                 {
                     "url_changed",
@@ -1764,7 +2985,7 @@ class BrowserManager:
             verified = bool(
                 {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
             ) or target_seen_after is not None
-        elif action_name in {"type", "select_option", "social_post", "search_page"}:
+        elif action_name in {"type", "select_option", "social_post", "social_comment", "social_dm", "search_page", "social_login"}:
             verified = bool({"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals))
         elif action_name in {"wait", "reload"}:
             verified = True

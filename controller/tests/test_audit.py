@@ -72,3 +72,40 @@ class AuditStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events[0].session_id, "session-2")
             self.assertEqual(events[-1].session_id, "session-1")
             self.assertTrue(db_path.exists())
+
+    async def test_file_store_trims_on_interval_not_every_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir) / "audit"
+            store = AuditStore(root, max_events=2, file_trim_interval=2)
+            await store.startup()
+
+            for index in range(3):
+                token = set_current_operator(f"operator-{index}")
+                try:
+                    await store.append(
+                        event_type="browser_action",
+                        status="ok",
+                        action="click",
+                        session_id=f"session-{index}",
+                    )
+                finally:
+                    reset_current_operator(token)
+
+            raw_lines = (root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len([line for line in raw_lines if line.strip()]), 3)
+
+            token = set_current_operator("operator-3")
+            try:
+                await store.append(
+                    event_type="browser_action",
+                    status="ok",
+                    action="click",
+                    session_id="session-3",
+                )
+            finally:
+                reset_current_operator(token)
+
+            events = await store.list(limit=10)
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0].session_id, "session-3")
+            self.assertEqual(events[-1].session_id, "session-2")

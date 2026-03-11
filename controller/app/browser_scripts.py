@@ -297,14 +297,35 @@ EXTRACT_PROFILE_SCRIPT = r"""
 SMOOTH_SCROLL_SCRIPT = r"""
 (deltaY) => {
   return new Promise((resolve) => {
-    const step = Math.sign(deltaY) * Math.min(Math.abs(deltaY), 80);
-    let remaining = Math.abs(deltaY);
+    const direction = Math.sign(deltaY) || 1;
+    const target = Math.abs(deltaY);
+    const overshoot = target > 240 ? Math.round(target * (0.04 + Math.random() * 0.08)) : 0;
+    let travelled = 0;
+    let correcting = false;
+
+    function nextDelay() {
+      return 14 + Math.random() * 22;
+    }
+
     function tick() {
-      if (remaining <= 0) { resolve(); return; }
-      const amount = Math.min(remaining, Math.abs(step));
-      window.scrollBy({ top: Math.sign(deltaY) * amount, behavior: 'auto' });
-      remaining -= amount;
-      setTimeout(tick, 16 + Math.random() * 8);
+      const remaining = correcting ? travelled : (target + overshoot - travelled);
+      if (remaining <= 0) {
+        if (!correcting && overshoot > 0) {
+          correcting = true;
+          travelled = overshoot;
+          setTimeout(tick, nextDelay());
+          return;
+        }
+        resolve();
+        return;
+      }
+
+      const baseStep = 45 + Math.random() * 65;
+      const amount = Math.min(remaining, baseStep);
+      const signed = correcting ? (-direction * amount) : (direction * amount);
+      window.scrollBy({ top: signed, behavior: 'auto' });
+      travelled += amount;
+      setTimeout(tick, nextDelay());
     }
     tick();
   });
@@ -371,6 +392,90 @@ FIND_FOLLOW_BUTTON_SCRIPT = r"""
 }
 """
 
+FIND_UNFOLLOW_BUTTON_SCRIPT = r"""
+() => {
+  const selectors = [
+    '[data-testid="unfollow"]',
+    '[aria-label*="following" i]',
+    '[aria-label*="unfollow" i]',
+    'button[class*="following"]',
+    'button[class*="unfollow"]',
+  ];
+  for (const sel of selectors) {
+    const els = [...document.querySelectorAll(sel)];
+    for (const el of els) {
+      const text = (el.innerText || el.getAttribute('aria-label') || '').toLowerCase();
+      if (!text.includes('following') && !text.includes('unfollow')) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return {
+          selector: sel,
+          x: Math.round(rect.x + rect.width / 2),
+          y: Math.round(rect.y + rect.height / 2),
+          label: (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 80),
+        };
+      }
+    }
+  }
+  return null;
+}
+"""
+
+FIND_REPLY_BUTTON_SCRIPT = r"""
+(postIndex) => {
+  const selectors = [
+    '[data-testid="reply"]',
+    '[data-testid="comment"]',
+    '[aria-label*="reply" i]',
+    '[aria-label*="comment" i]',
+    'button[class*="reply"]',
+    'button[class*="comment"]',
+  ];
+  const buttons = [];
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      buttons.push({
+        selector: sel,
+        x: Math.round(rect.x + rect.width / 2),
+        y: Math.round(rect.y + rect.height / 2),
+        label: (el.getAttribute('aria-label') || el.innerText || '').trim().slice(0, 80),
+      });
+    }
+  }
+  return buttons[postIndex] || buttons[0] || null;
+}
+"""
+
+FIND_REPOST_BUTTON_SCRIPT = r"""
+(postIndex) => {
+  const selectors = [
+    '[data-testid="retweet"]',
+    '[data-testid="repost"]',
+    '[aria-label*="retweet" i]',
+    '[aria-label*="repost" i]',
+    '[aria-label*="share post" i]',
+    'button[class*="retweet"]',
+    'button[class*="repost"]',
+  ];
+  const buttons = [];
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      buttons.push({
+        selector: sel,
+        x: Math.round(rect.x + rect.width / 2),
+        y: Math.round(rect.y + rect.height / 2),
+        label: (el.getAttribute('aria-label') || el.innerText || '').trim().slice(0, 80),
+      });
+    }
+  }
+  return buttons[postIndex] || buttons[0] || null;
+}
+"""
+
 FIND_SEARCH_INPUT_SCRIPT = r"""
 () => {
   const selectors = [
@@ -394,6 +499,118 @@ FIND_SEARCH_INPUT_SCRIPT = r"""
 }
 """
 
+EXTRACT_COMMENTS_SCRIPT = r"""
+(limit) => {
+  const out = [];
+  const seen = new Set();
+  const selectors = [
+    'article',
+    '[role="article"]',
+    '[data-testid*="reply"]',
+    '[data-testid*="comment"]',
+    '[class*="comment"]',
+    '[class*="reply"]',
+    'li'
+  ];
+  for (const el of document.querySelectorAll(selectors.join(','))) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 12) continue;
+    const signature = text.slice(0, 120);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    const author = el.querySelector('[data-testid="User-Name"], [class*="author"], strong, h3, h4')?.textContent || null;
+    out.push({
+      author: author ? author.replace(/\s+/g, ' ').trim().slice(0, 120) : null,
+      text: text.slice(0, 800),
+      y_position: Math.round(rect.top + window.scrollY),
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+"""
+
+FIND_ACCESSIBLE_TARGET_SCRIPT = r"""
+(options) => {
+  const keywords = (options?.keywords || []).map((item) => String(item).toLowerCase());
+  const excludeKeywords = (options?.excludeKeywords || []).map((item) => String(item).toLowerCase());
+  const index = Number.isInteger(options?.index) ? options.index : 0;
+  const requireTextbox = Boolean(options?.requireTextbox);
+  const selector = options?.selector || [
+    'button',
+    'a',
+    'input',
+    'textarea',
+    'select',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+  ].join(',');
+
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+
+  const isTextbox = (el) => {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    return (
+      el.isContentEditable ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.tagName === 'TEXTAREA' ||
+      (el.tagName === 'INPUT' && !['checkbox', 'radio', 'submit', 'button'].includes((el.type || '').toLowerCase())) ||
+      role === 'textbox'
+    );
+  };
+
+  const describe = (el) => {
+    return [
+      el.getAttribute('aria-label'),
+      el.getAttribute('title'),
+      el.getAttribute('placeholder'),
+      el.getAttribute('name'),
+      el.getAttribute('id'),
+      el.innerText,
+      el.textContent,
+      el.value,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  };
+
+  const matches = [];
+  for (const el of document.querySelectorAll(selector)) {
+    if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
+    if (requireTextbox && !isTextbox(el)) continue;
+    const description = describe(el);
+    if (keywords.length && !keywords.some((keyword) => description.includes(keyword))) continue;
+    if (excludeKeywords.some((keyword) => description.includes(keyword))) continue;
+    if (!el.dataset.operatorId) {
+      el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    const rect = el.getBoundingClientRect();
+    matches.push({
+      selector: `[data-operator-id="${el.dataset.operatorId}"]`,
+      element_id: el.dataset.operatorId,
+      x: Math.round(rect.x + rect.width / 2),
+      y: Math.round(rect.y + rect.height / 2),
+      label: description.slice(0, 160),
+      tag: el.tagName.toLowerCase(),
+    });
+  }
+  return matches[index] || matches[0] || null;
+}
+"""
+
 async def apply_stealth(page: object) -> None:
     """Inject stealth init script into a page before any navigation."""
-    await page.add_init_script(STEALTH_INIT_SCRIPT)
+    add_init_script = getattr(page, "add_init_script", None)
+    if callable(add_init_script):
+        await add_init_script(STEALTH_INIT_SCRIPT)

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 from app.approvals import ApprovalRequiredError
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
+from app.social_errors import SocialActionError
 from app.tool_gateway import McpToolGateway
 
 
@@ -26,10 +27,16 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             close_session=AsyncMock(return_value={"closed": True}),
             scroll_feed=AsyncMock(return_value={"action": "scroll_feed"}),
             extract_posts=AsyncMock(return_value=[{"text": "hello"}]),
+            extract_comments=AsyncMock(return_value=[{"text": "reply"}]),
             extract_profile=AsyncMock(return_value={"username": "@example"}),
             post_content=AsyncMock(return_value={"action": "social_post"}),
+            comment_on_post=AsyncMock(return_value={"action": "social_comment"}),
             like_post=AsyncMock(return_value={"action": "social_like"}),
             follow_user=AsyncMock(return_value={"action": "social_follow"}),
+            unfollow_user=AsyncMock(return_value={"action": "social_unfollow"}),
+            repost_post=AsyncMock(return_value={"action": "social_repost"}),
+            send_direct_message=AsyncMock(return_value={"action": "social_dm"}),
+            social_login=AsyncMock(return_value={"action": "social_login"}),
             search_page=AsyncMock(return_value={"action": "social_search"}),
             list_approvals=AsyncMock(return_value=[]),
             approve=AsyncMock(return_value={"id": "approval-1", "status": "approved"}),
@@ -64,8 +71,13 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.list_agent_jobs", names)
         self.assertIn("browser.get_remote_access", names)
         self.assertIn("social.post", names)
+        self.assertIn("social.comment", names)
         self.assertIn("social.like", names)
         self.assertIn("social.follow", names)
+        self.assertIn("social.unfollow", names)
+        self.assertIn("social.repost", names)
+        self.assertIn("social.dm", names)
+        self.assertIn("social.login", names)
         self.assertIn("social.search", names)
         self.assertEqual(len(names), len(tools))
 
@@ -103,6 +115,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "proxy_username": "alice",
                     "proxy_password": "secret",
                     "user_agent": "AutoBrowserTest/1.0",
+                    "totp_secret": "JBSWY3DPEHPK3PXP",
                 },
             )
         )
@@ -116,6 +129,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             request_proxy_username="alice",
             request_proxy_password="secret",
             user_agent="AutoBrowserTest/1.0",
+            totp_secret="JBSWY3DPEHPK3PXP",
         )
 
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
@@ -205,3 +219,77 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             text="hello world",
             approval_id="approval-social-1",
         )
+
+    async def test_social_comment_tool_forwards_fields(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="social.comment",
+                arguments={
+                    "session_id": "session-1",
+                    "text": "great update",
+                    "post_index": 2,
+                    "approval_id": "approval-social-2",
+                },
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.comment_on_post.assert_awaited_once_with(
+            "session-1",
+            text="great update",
+            post_index=2,
+            approval_id="approval-social-2",
+        )
+
+    async def test_social_login_tool_forwards_credentials_and_approval(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="social.login",
+                arguments={
+                    "session_id": "session-1",
+                    "platform": "x",
+                    "username": "alice",
+                    "password": "secret-password",
+                    "approval_id": "approval-login-1",
+                    "totp_secret": "JBSWY3DPEHPK3PXP",
+                },
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.social_login.assert_awaited_once_with(
+            "session-1",
+            platform="x",
+            username="alice",
+            password="secret-password",
+            approval_id="approval-login-1",
+            totp_secret="JBSWY3DPEHPK3PXP",
+        )
+
+    async def test_social_errors_return_structured_tool_error(self) -> None:
+        self.manager.social_login = AsyncMock(
+            side_effect=SocialActionError(
+                "captcha detected",
+                action="social_login",
+                code="captcha_detected",
+                retryable=False,
+                url="https://x.com/i/flow/login",
+                details={"signal": "captcha"},
+            )
+        )
+
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="social.login",
+                arguments={
+                    "session_id": "session-1",
+                    "platform": "x",
+                    "username": "alice",
+                    "password": "secret-password",
+                },
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent["code"], "captcha_detected")
+        self.assertEqual(response.structuredContent["action"], "social_login")

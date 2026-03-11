@@ -147,6 +147,7 @@ class Settings(BaseSettings):
     connect_retry_delay_seconds: float = Field(1.0, alias="CONNECT_RETRY_DELAY_SECONDS")
     max_sessions: int = Field(1, alias="MAX_SESSIONS")
     require_approval_for_uploads: bool = Field(True, alias="REQUIRE_APPROVAL_FOR_UPLOADS")
+    approval_ttl_minutes: int = Field(15, alias="APPROVAL_TTL_MINUTES")
     enable_tracing: bool = Field(True, alias="ENABLE_TRACING")
     typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")
@@ -157,6 +158,7 @@ class Settings(BaseSettings):
         "/healthz,/readyz,/docs,/openapi.json,/redoc,/artifacts,/metrics",
         alias="REQUEST_RATE_LIMIT_EXEMPT_PATHS",
     )
+    mcp_session_store_path: str = Field("/data/mcp/sessions.json", alias="MCP_SESSION_STORE_PATH")
     cleanup_on_startup: bool = Field(True, alias="CLEANUP_ON_STARTUP")
     cleanup_interval_seconds: float = Field(3600.0, alias="CLEANUP_INTERVAL_SECONDS")
     artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")

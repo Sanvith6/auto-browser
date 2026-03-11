@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -22,6 +25,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
 )
 CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 INITIALIZATION_REQUIRED_ERROR = -32002
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,6 +46,7 @@ class McpHttpTransport:
         server_version: str,
         server_title: str | None = None,
         allowed_origins: list[str] | None = None,
+        session_store_path: str | None = None,
     ):
         self.tool_gateway = tool_gateway
         self.server_name = server_name
@@ -49,6 +54,8 @@ class McpHttpTransport:
         self.server_title = server_title or server_name
         self.allowed_origins = tuple(allowed_origins or [])
         self._sessions: dict[str, McpSession] = {}
+        self._session_store_path = Path(session_store_path).resolve() if session_store_path else None
+        self._load_sessions()
 
     async def handle_post_request(self, request: Request) -> Response:
         origin_error = self._validate_origin(request)
@@ -102,6 +109,7 @@ class McpHttpTransport:
             return self._json_error_response(None, -32000, f"Missing required header: {MCP_SESSION_HEADER}", status_code=400)
         if self._sessions.pop(session_id, None) is None:
             return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
+        self._persist_sessions()
         return Response(status_code=204)
 
     async def _handle_notification(self, request: Request, payload: dict[str, Any]) -> Response:
@@ -116,6 +124,7 @@ class McpHttpTransport:
         method = payload["method"]
         if method == "notifications/initialized":
             session.initialized = True
+            self._persist_sessions()
         return Response(status_code=202)
 
     async def _handle_request(self, request: Request, payload: dict[str, Any]) -> Response:
@@ -205,6 +214,7 @@ class McpHttpTransport:
             client_capabilities=self._coerce_dict(params.get("capabilities")),
         )
         self._sessions[session.id] = session
+        self._persist_sessions()
 
         result = {
             "protocolVersion": session.protocol_version,
@@ -305,6 +315,43 @@ class McpHttpTransport:
         if not parsed.scheme or not parsed.netloc:
             return None
         return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+    def _load_sessions(self) -> None:
+        if self._session_store_path is None or not self._session_store_path.exists():
+            return
+        try:
+            payload = json.loads(self._session_store_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("failed to load MCP sessions from %s: %s", self._session_store_path, exc)
+            return
+        if not isinstance(payload, list):
+            logger.warning("ignoring malformed MCP session store at %s", self._session_store_path)
+            return
+        restored: dict[str, McpSession] = {}
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                session = McpSession(
+                    id=str(item["id"]),
+                    protocol_version=str(item["protocol_version"]),
+                    client_info=self._coerce_dict(item.get("client_info")),
+                    client_capabilities=self._coerce_dict(item.get("client_capabilities")),
+                    initialized=bool(item.get("initialized", False)),
+                )
+            except Exception:
+                continue
+            restored[session.id] = session
+        self._sessions = restored
+
+    def _persist_sessions(self) -> None:
+        if self._session_store_path is None:
+            return
+        self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._session_store_path.with_suffix(".json.tmp")
+        payload = [asdict(session) for session in self._sessions.values()]
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(self._session_store_path)
 
     @staticmethod
     def _coerce_dict(value: Any) -> dict[str, Any]:
