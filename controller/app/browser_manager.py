@@ -1152,6 +1152,40 @@ class BrowserManager:
             details=details,
         )
 
+    async def _clear_focused_input(self, session: BrowserSession, locator: Any) -> None:
+        try:
+            await locator.fill("")
+            return
+        except Exception:
+            pass
+        await session.page.keyboard.press("Control+a")
+        await asyncio.sleep(0.03)
+        await session.page.keyboard.press("Delete")
+
+    async def _ensure_no_social_interlock(self, session: BrowserSession, *, action: str) -> None:
+        challenge = await self._check_bot_challenge(session)
+        if challenge is not None:
+            await self.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
+            await self._raise_social_action_error(
+                session,
+                action=action,
+                code="captcha_detected",
+                message=f"Human takeover required: {challenge['signal']}",
+                retryable=False,
+                details=challenge,
+            )
+        rate_limit = await self._check_rate_limit_signal(session)
+        if rate_limit is not None:
+            await self.request_human_takeover(session.id, reason=f"Rate limit detected: {rate_limit['signal']}")
+            await self._raise_social_action_error(
+                session,
+                action=action,
+                code="rate_limited",
+                message=f"Platform blocked the action: {rate_limit['signal']}",
+                retryable=False,
+                details=rate_limit,
+            )
+
     async def _check_rate_limit_signal(self, session: BrowserSession) -> dict[str, Any] | None:
         phrases = [
             "try again later",
