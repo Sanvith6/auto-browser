@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
-from app.models import BrowserActionDecision
+from app.models import BrowserActionDecision, CreateSessionRequest
 
 
 class BrowserActionDecisionExtendedTests(unittest.TestCase):
@@ -81,6 +81,30 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             BrowserActionDecision(action="social_login", reason="Log into X", platform="x")
+
+    def test_create_session_rejects_auth_profile_and_storage_state_together(self) -> None:
+        with self.assertRaises(ValidationError):
+            CreateSessionRequest(storage_state_path="state.json", auth_profile="outlook-default")
+
+    def test_text_target_payload_redacts_sensitive_values(self) -> None:
+        redacted = BrowserManager._text_target_payload(
+            {"selector": "#password"},
+            "secret-password",
+            clear_first=True,
+            sensitive=True,
+            preview_chars=80,
+        )
+        self.assertTrue(redacted["text_redacted"])
+        self.assertNotIn("text_preview", redacted)
+
+        visible = BrowserManager._text_target_payload(
+            {"selector": "#search"},
+            "playwright",
+            clear_first=True,
+            sensitive=False,
+            preview_chars=80,
+        )
+        self.assertEqual(visible["text_preview"], "playwright")
 
 
 class FakeDownload:

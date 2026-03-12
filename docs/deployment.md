@@ -35,6 +35,21 @@ UPLOAD_RETENTION_HOURS=168
 AUTH_RETENTION_HOURS=168
 ```
 
+## Auth profiles
+
+Auto Browser now supports reusable named auth profiles under:
+
+```text
+/data/auth/profiles/<profile-name>/
+```
+
+Use them when you want a human to log in once and let future sessions resume from saved browser state without passing raw storage-state file paths around.
+
+Recommended pattern:
+- use one profile per account/workflow
+- keep auth-state encryption enabled in production
+- treat profile names as operator-facing labels, not secrets
+
 ## Provider authentication choices
 
 You now have two viable ways to authenticate model providers:

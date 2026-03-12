@@ -42,11 +42,23 @@ class SaveAuthStateInput(SessionIdInput):
     path: str
 
 
+class SaveAuthProfileInput(SessionIdInput):
+    profile_name: str = Field(min_length=1, max_length=120)
+
+
 class TakeoverInput(SessionIdInput):
     reason: str = "Manual review requested"
 
 
 class ListDownloadsInput(SessionIdInput):
+    pass
+
+
+class AuthProfileNameInput(BaseModel):
+    profile_name: str = Field(min_length=1, max_length=120)
+
+
+class ListAuthProfilesInput(BaseModel):
     pass
 
 
@@ -137,9 +149,10 @@ class SocialDmInput(SessionIdInput):
 
 
 class SocialLoginInput(SessionIdInput):
-    platform: Literal["x", "twitter", "instagram", "linkedin"]
+    platform: Literal["x", "twitter", "instagram", "linkedin", "outlook", "microsoft", "live"]
     username: str = Field(min_length=1, max_length=500)
     password: str = Field(min_length=1, max_length=5000, repr=False)
+    auth_profile: str | None = Field(default=None, max_length=120)
     approval_id: str | None = None
     totp_secret: str | None = Field(default=None, repr=False)
 
@@ -189,6 +202,18 @@ class McpToolGateway:
                     handler=self._observe,
                 ),
                 ToolSpec(
+                    name="browser.list_auth_profiles",
+                    description="List reusable saved auth profiles that can be loaded into a new session.",
+                    input_model=ListAuthProfilesInput,
+                    handler=self._list_auth_profiles,
+                ),
+                ToolSpec(
+                    name="browser.get_auth_profile",
+                    description="Inspect one saved auth profile and its storage-state metadata.",
+                    input_model=AuthProfileNameInput,
+                    handler=self._get_auth_profile,
+                ),
+                ToolSpec(
                     name="browser.list_downloads",
                     description="List files captured from browser downloads for one session.",
                     input_model=ListDownloadsInput,
@@ -223,6 +248,12 @@ class McpToolGateway:
                     description="Save session storage state to the per-session auth-state root.",
                     input_model=SaveAuthStateInput,
                     handler=self._save_auth_state,
+                ),
+                ToolSpec(
+                    name="browser.save_auth_profile",
+                    description="Save the current session storage state into a reusable named auth profile.",
+                    input_model=SaveAuthProfileInput,
+                    handler=self._save_auth_profile,
                 ),
                 ToolSpec(
                     name="browser.request_human_takeover",
@@ -453,6 +484,7 @@ class McpToolGateway:
             name=payload.name,
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
+            auth_profile=payload.auth_profile,
             request_proxy_server=payload.proxy_server,
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
@@ -468,6 +500,12 @@ class McpToolGateway:
 
     async def _observe(self, payload: ObserveInput) -> dict[str, Any]:
         return await self.manager.observe(payload.session_id, limit=payload.limit)
+
+    async def _list_auth_profiles(self, _: ListAuthProfilesInput) -> list[dict[str, Any]]:
+        return await self.manager.list_auth_profiles()
+
+    async def _get_auth_profile(self, payload: AuthProfileNameInput) -> dict[str, Any]:
+        return await self.manager.get_auth_profile(payload.profile_name)
 
     async def _list_downloads(self, payload: ListDownloadsInput) -> list[dict[str, Any]]:
         return await self.manager.list_downloads(payload.session_id)
@@ -490,6 +528,9 @@ class McpToolGateway:
 
     async def _save_auth_state(self, payload: SaveAuthStateInput) -> dict[str, Any]:
         return await self.manager.save_storage_state(payload.session_id, payload.path)
+
+    async def _save_auth_profile(self, payload: SaveAuthProfileInput) -> dict[str, Any]:
+        return await self.manager.save_auth_profile(payload.session_id, payload.profile_name)
 
     async def _takeover(self, payload: TakeoverInput) -> dict[str, Any]:
         return await self.manager.request_human_takeover(payload.session_id, payload.reason)
@@ -597,6 +638,7 @@ class McpToolGateway:
             platform=payload.platform,
             username=payload.username,
             password=payload.password,
+            auth_profile=payload.auth_profile,
             approval_id=payload.approval_id,
             totp_secret=payload.totp_secret,
         )

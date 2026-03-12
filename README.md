@@ -1,6 +1,31 @@
 # Auto Browser
 
-A visual Auto Browser control plane for LLM-driven workflows.
+[![CI](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![MCP Server](https://img.shields.io/badge/MCP-server-blue)](./README.md)
+[![Local First](https://img.shields.io/badge/local-first-0ea5e9)](./README.md)
+
+![Auto Browser hero](docs/assets/hero.svg)
+
+Open-source **MCP-native browser agent** for authorized workflows.
+
+Auto Browser gives MCP clients, LLMs, and human operators a shared Playwright-powered browser with:
+- screen-aware observations
+- reusable auth profiles
+- human takeover via noVNC
+- approval rails for risky actions
+- MCP + REST interfaces
+- durable artifacts, sessions, and audit history
+
+Works with:
+- Claude Desktop
+- Cursor
+- any MCP client that can speak JSON-RPC tools
+- direct REST callers when you want curl-first control
+
+If you want one clean mental model, this repo is:
+
+> **browser agent as an MCP server**
 
 This scaffold gives you:
 - a **browser node** with Chromium, Xvfb, x11vnc, and noVNC
@@ -10,6 +35,7 @@ This scaffold gives you:
 - **human takeover** through noVNC
 - **artifact capture** for screenshots, traces, and storage state
 - optional **encrypted auth-state storage** with max-age enforcement on restore
+- reusable **named auth profiles** for login-once, reuse-later workflows
 - **basic policy rails** with host allowlists and upload approval gates
 - **durable session metadata** under `/data/sessions`, with optional Redis backing
 - **durable agent job records** under `/data/jobs` with background workers for queued step/run requests
@@ -28,6 +54,22 @@ This scaffold gives you:
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
 
+## Good fits
+
+- internal dashboards and admin tools
+- agent-assisted QA and browser debugging
+- login-once, reuse-later account workflows
+- export/download/report flows
+- brittle sites where a human may need to step in
+- MCP-powered agent workflows that need a real browser
+
+## Not the goal
+
+- anti-bot bypass
+- CAPTCHA solving
+- stealth/evasion work
+- unauthorized scraping or account automation
+
 ## Architecture at a glance
 
 ```mermaid
@@ -44,10 +86,14 @@ flowchart LR
 See:
 - `docs/architecture.md` for the full design
 - `docs/llm-adapters.md` for the model-facing action loop
+- `docs/mcp-clients.md` for MCP client integration notes
 - `docs/production-hardening.md` for the production target/spec
 - `docs/deployment.md` for the deployment and credential handoff checklist
+- `examples/README.md` for curl-first examples
+- `ROADMAP.md` for project direction
+- `CONTRIBUTING.md` if you want to help
 
-## Quickstart
+## 60-second quickstart
 
 ```bash
 cd auto-browser
@@ -60,6 +106,117 @@ Open:
 - Visual takeover: `http://localhost:6080/vnc.html?autoconnect=true&resize=scale`
 
 All published ports bind to `127.0.0.1` by default.
+
+Then run the readiness smoke:
+
+```bash
+make doctor
+```
+
+To see the rest of the common commands:
+
+```bash
+make help
+```
+
+## Quick demo flow
+
+The fastest way to understand the project:
+
+1. create a session
+2. observe the page
+3. take over visually if needed
+4. save an auth profile
+5. reopen a new session from that saved profile
+
+That flow is what makes the project actually useful in day-to-day work.
+
+## Real demo flow
+
+The simplest high-signal demo for this project is:
+
+1. log into Outlook once
+2. save the browser state as `outlook-default`
+3. open a fresh session from `auth_profile: "outlook-default"`
+4. continue work without reauthing
+
+That is the clearest example of why this is more useful than plain browser automation.
+
+## MCP usage
+
+Auto Browser exposes a real MCP transport at:
+
+```text
+/mcp
+```
+
+It also exposes convenience tool endpoints at:
+
+```text
+/mcp/tools
+/mcp/tools/call
+```
+
+That means you can use it as:
+- a local browser tool server for MCP clients
+- a supervised browser backend for agent frameworks
+- a plain REST API if you want to script it directly
+
+The differentiator is not just “browser automation.”
+The differentiator is **a browser agent that is already packaged as an MCP server**.
+
+### MCP client note
+
+If your MCP client supports HTTP transports, point it at:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+If your client only supports stdio-style MCP, use a thin local bridge in front of the HTTP endpoint.
+The important part is that Auto Browser already exposes a real MCP tool surface on the server side.
+
+## Why this is free
+
+Auto Browser is designed to be free to use because it is:
+
+- open-source
+- self-hosted
+- local-first
+- bring-your-own browser/runtime
+- bring-your-own model/provider
+
+There is no required hosted control plane in the core project.
+
+### One-command readiness check
+
+For a quick VPS sanity check before a live session:
+
+```bash
+make doctor
+```
+
+For a fuller pre-release pass that validates docs, compose config, tests, and the live smoke:
+
+```bash
+make release-audit
+```
+
+That script:
+- picks alternate local ports automatically if `8000`, `6080`, or `5900` are already occupied
+- waits for `/readyz`
+- prints provider readiness
+- runs a real create-session + observe smoke
+- runs one agent-step smoke when the chosen provider is configured
+- loads the repo-local `.env` so ambient shell secrets do not accidentally override tonight's config
+
+If you also want it to rebuild the images first:
+
+```bash
+DOCTOR_BUILD=1 make doctor
+```
+
+If you are using `OPENAI_AUTH_MODE=host_bridge`, make sure the Codex bridge is already running first.
 
 If you want the controller API itself protected, set `API_BEARER_TOKEN` and send:
 
@@ -387,6 +544,24 @@ curl -s http://localhost:8000/sessions/<session-id>/actions/type \
   -d '{"selector":"input[name=q]","text":"playwright mcp","clear_first":true}' | jq
 ```
 
+For secrets, set `sensitive=true` so action logs redact the typed preview:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/actions/type \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"selector":"input[type=password]","text":"super-secret","clear_first":true,"sensitive":true}' | jq
+```
+
+For passwords, OTPs, or other secrets, set `sensitive: true` so action logs redact the typed value preview:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/actions/type \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"element_id":"op-password","text":"super-secret","clear_first":true,"sensitive":true}' | jq
+```
+
 ### Save auth state for later reuse
 
 ```bash
@@ -414,6 +589,125 @@ Inspect the current auth-state metadata:
 
 ```bash
 curl -s http://localhost:8000/sessions/<session-id>/auth-state | jq
+```
+
+### Save a reusable auth profile
+
+Auth profiles live under `/data/auth/profiles/<profile-name>/` and are not cleaned up by routine retention jobs.
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/auth-profiles \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"profile_name":"outlook-default"}' | jq
+```
+
+List saved profiles:
+
+```bash
+curl -s http://localhost:8000/auth-profiles | jq
+curl -s http://localhost:8000/auth-profiles/outlook-default | jq
+```
+
+Start a new session from a saved profile:
+
+```bash
+curl -s http://localhost:8000/sessions \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"name":"outlook-resume","auth_profile":"outlook-default","start_url":"https://outlook.live.com/mail/0/"}' | jq
+```
+
+### Outlook login + save workflow
+
+This is the simplest pattern for “human login once, then reuse later”.
+
+```bash
+curl -s http://localhost:8000/sessions \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"name":"outlook-login","start_url":"https://login.live.com/"}' | jq
+```
+
+Then log in and save the profile in one step:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/social/login \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "platform":"outlook",
+    "username":"you@example.com",
+    "password":"REDACTED",
+    "auth_profile":"outlook-default"
+  }' | jq
+```
+
+If Microsoft throws a human verification wall, use the returned `takeover_url`, finish the challenge manually in noVNC, then save the profile:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/auth-profiles \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"profile_name":"outlook-default"}' | jq
+```
+
+### Save a reusable auth profile
+
+Per-session auth-state files are good for debugging. Named auth profiles are better for repeat runs.
+
+Save the current browser context as a reusable profile:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/auth-profiles \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"profile_name":"outlook-default"}' | jq
+```
+
+List saved profiles:
+
+```bash
+curl -s http://localhost:8000/auth-profiles | jq
+```
+
+Start a new session from a saved profile:
+
+```bash
+curl -s http://localhost:8000/sessions \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"name":"outlook-mail","start_url":"https://outlook.live.com/mail/0/","auth_profile":"outlook-default"}' | jq
+```
+
+Saved auth profiles live under:
+
+```text
+/data/auth/profiles/<profile-name>/
+```
+
+The maintenance cleaner treats `/data/auth/profiles` as persistent state, so reusable profiles are not pruned like stale session artifacts.
+
+### Outlook login + save-session workflow
+
+If you already own the mailbox and just need a reusable logged-in session:
+
+1. Create a session at `https://login.live.com/`
+2. Run `POST /sessions/<id>/social/login` with:
+   - `"platform": "outlook"`
+   - `"username": "<mailbox>"`
+   - `"password": "<password>"`
+   - optional `"auth_profile": "outlook-default"`
+3. If Microsoft shows CAPTCHA or “press and hold”, switch to the session `takeover_url`
+4. When login completes, reuse the saved auth profile in future sessions
+
+Example:
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/social/login \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"platform":"outlook","username":"you@outlook.com","password":"...","auth_profile":"outlook-default"}' | jq
 ```
 
 ### Stage upload files

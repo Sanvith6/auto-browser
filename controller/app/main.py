@@ -27,6 +27,7 @@ from .models import (
     McpToolCallRequest,
     NavigateRequest,
     PressRequest,
+    SaveAuthProfileRequest,
     SaveStorageStateRequest,
     ScrollRequest,
     SocialCommentRequest,
@@ -368,12 +369,15 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             name=payload.name,
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
+            auth_profile=payload.auth_profile,
             request_proxy_server=payload.proxy_server,
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
             user_agent=payload.user_agent,
             totp_secret=payload.totp_secret,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -400,6 +404,21 @@ async def get_session_auth_state(session_id: str) -> dict:
         return await manager.get_auth_state_info(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.get("/auth-profiles")
+async def list_auth_profiles() -> list[dict]:
+    return await manager.list_auth_profiles()
+
+
+@app.get("/auth-profiles/{profile_name}")
+async def get_auth_profile(profile_name: str) -> dict:
+    try:
+        return await manager.get_auth_profile(profile_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown auth profile: {profile_name}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/sessions/{session_id}/observe")
@@ -487,6 +506,7 @@ async def type_text(session_id: str, payload: TypeRequest) -> dict:
             element_id=payload.element_id,
             text=payload.text,
             clear_first=payload.clear_first,
+            sensitive=payload.sensitive,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
@@ -713,6 +733,7 @@ async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
             platform=payload.platform,
             username=payload.username,
             password=payload.password,
+            auth_profile=payload.auth_profile,
             approval_id=payload.approval_id,
             totp_secret=payload.totp_secret,
         )
@@ -742,6 +763,18 @@ async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) 
         return await manager.save_storage_state(session_id, payload.path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/auth-profiles")
+async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) -> dict:
+    try:
+        return await manager.save_auth_profile(session_id, payload.profile_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 

@@ -32,7 +32,8 @@ What the model reasons over:
 - interactable elements with stable `element_id`
 - selector hints and bounding boxes
 - console and page errors
-- optional accessibility snapshots in a later iteration
+- accessibility summaries and focused-node context
+- optional OCR excerpts when the DOM is weak
 
 ### 3. Action plane
 What actually touches the browser:
@@ -106,6 +107,7 @@ One session should own:
 - one primary page
 - one artifact directory
 - one optional auth-state file
+- one optional reusable auth-profile reference
 - one lock so actions happen in order
 
 Why:

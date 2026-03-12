@@ -99,7 +99,7 @@ class MaintenanceService:
         ]
 
     def _protected_roots(self) -> list[Path]:
-        protected: list[Path] = []
+        protected: list[Path] = [Path(self.settings.auth_root).resolve() / "profiles"]
         for session in self.session_provider():
             for attr in ("artifact_dir", "upload_dir", "auth_dir"):
                 value = getattr(session, attr, None)

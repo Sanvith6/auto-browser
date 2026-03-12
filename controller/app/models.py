@@ -9,11 +9,18 @@ class CreateSessionRequest(BaseModel):
     name: str | None = None
     start_url: str | None = None
     storage_state_path: str | None = None
+    auth_profile: str | None = None
     proxy_server: str | None = None
     proxy_username: str | None = None
     proxy_password: str | None = None
     user_agent: str | None = None
     totp_secret: str | None = Field(default=None, repr=False)
+
+    @model_validator(mode="after")
+    def validate_auth_source(self) -> "CreateSessionRequest":
+        if self.storage_state_path and self.auth_profile:
+            raise ValueError("Provide auth_profile or storage_state_path, not both")
+        return self
 
 
 class ClickRequest(BaseModel):
@@ -28,6 +35,7 @@ class TypeRequest(BaseModel):
     element_id: str | None = None
     text: str
     clear_first: bool = True
+    sensitive: bool = False
 
 
 class PressRequest(BaseModel):
@@ -61,6 +69,10 @@ class UploadRequest(BaseModel):
 
 class SaveStorageStateRequest(BaseModel):
     path: str = Field(description="Relative path inside /data/auth")
+
+
+class SaveAuthProfileRequest(BaseModel):
+    profile_name: str = Field(min_length=1, max_length=120)
 
 
 class HumanTakeoverRequest(BaseModel):
@@ -142,6 +154,7 @@ class BrowserActionDecision(BaseModel):
     y: float | None = None
     text: str | None = None
     clear_first: bool = True
+    sensitive: bool = False
     key: str | None = None
     value: str | None = None
     label: str | None = None
@@ -423,9 +436,10 @@ class SocialDmRequest(BaseModel):
 
 
 class SocialLoginRequest(BaseModel):
-    platform: Literal["x", "twitter", "instagram", "linkedin"]
+    platform: Literal["x", "twitter", "instagram", "linkedin", "outlook", "microsoft", "live"]
     username: str = Field(min_length=1, max_length=500)
     password: str = Field(min_length=1, max_length=5000, repr=False)
+    auth_profile: str | None = Field(default=None, max_length=120)
     approval_id: str | None = None
     totp_secret: str | None = Field(default=None, max_length=500, repr=False)
 

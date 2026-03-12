@@ -81,6 +81,7 @@ class BrowserSession:
     attached_pages: set[int] = field(default_factory=set)
     last_action: str | None = None
     last_auth_state_path: Path | None = None
+    auth_profile_name: str | None = None
     tunnel_error: str | None = None
     mouse_position: tuple[float, float] | None = None
     totp_secret: str | None = None
@@ -426,12 +427,15 @@ class BrowserManager:
         name: str | None = None,
         start_url: str | None = None,
         storage_state_path: str | None = None,
+        auth_profile: str | None = None,
         request_proxy_server: str | None = None,
         request_proxy_username: str | None = None,
         request_proxy_password: str | None = None,
         user_agent: str | None = None,
         totp_secret: str | None = None,
     ) -> dict[str, Any]:
+        if storage_state_path and auth_profile:
+            raise ValueError("Provide auth_profile or storage_state_path, not both")
         if start_url:
             self._assert_url_allowed(start_url)
         if len(self.sessions) >= self.settings.max_sessions:
@@ -456,6 +460,7 @@ class BrowserManager:
         auth_dir.mkdir(parents=True, exist_ok=True)
         upload_dir.mkdir(parents=True, exist_ok=True)
         prepared_auth_state = None
+        source_path: Path | None = None
 
         # Choose proxy: per-session override > default settings
         proxy_server = request_proxy_server or self.settings.default_proxy_server
@@ -488,8 +493,11 @@ class BrowserManager:
             if proxy_password:
                 proxy_cfg["password"] = proxy_password
             context_kwargs["proxy"] = proxy_cfg
-        if storage_state_path:
+        if auth_profile:
+            source_path = self._resolve_auth_profile_state_path(auth_profile, must_exist=True)
+        elif storage_state_path:
             source_path = self._safe_auth_path(storage_state_path, must_exist=True)
+        if source_path is not None:
             prepared_auth_state = self.auth_state.prepare_for_context(source_path)
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
 
@@ -526,9 +534,12 @@ class BrowserManager:
                 shared_browser_process=runtime is None,
                 max_live_sessions_per_browser_node=1,
                 last_auth_state_path=source_path if storage_state_path else None,
+                auth_profile_name=self._normalize_auth_profile_name(auth_profile) if auth_profile else None,
                 mouse_position=(vw / 2, vh / 2),
                 totp_secret=totp_secret,
             )
+            if source_path is not None:
+                session.last_auth_state_path = source_path
             self._attach_page_listeners(page, session)
             if hasattr(context, "on"):
                 context.on("page", lambda popup: self._attach_page_listeners(popup, session))
@@ -549,6 +560,7 @@ class BrowserManager:
                 details={
                     "start_url": start_url,
                     "storage_state_path": storage_state_path,
+                    "auth_profile": auth_profile,
                     "isolation_mode": session.isolation_mode,
                     "browser_node": session.browser_node_name,
                     "totp_enabled": bool(totp_secret),
@@ -790,12 +802,17 @@ class BrowserManager:
         selector: str | None = None,
         element_id: str | None = None,
         clear_first: bool = True,
+        sensitive: bool = False,
     ) -> dict[str, Any]:
         session = await self.get_session(session_id)
         target = self._resolve_target(selector=selector, element_id=element_id)
+        payload = self._text_target_payload(target, text, clear_first=clear_first, sensitive=sensitive, preview_chars=80)
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
+            if await self._locator_is_sensitive_input(locator):
+                payload.pop("text_preview", None)
+                payload["text_redacted"] = True
             await locator.scroll_into_view_if_needed()
             await self._focus_locator(session, locator)
             if clear_first:
@@ -809,9 +826,49 @@ class BrowserManager:
         return await self._run_action(
             session,
             "type",
-            {**target, "clear_first": clear_first, "text_preview": text[:80]},
+            payload,
             operation,
         )
+
+    @staticmethod
+    def _text_target_payload(
+        target: dict[str, Any],
+        text: str,
+        *,
+        clear_first: bool,
+        sensitive: bool,
+        preview_chars: int,
+    ) -> dict[str, Any]:
+        payload = {**target, "clear_first": clear_first}
+        if sensitive:
+            payload["text_redacted"] = True
+        else:
+            payload["text_preview"] = text[:preview_chars]
+        return payload
+
+    async def _locator_is_sensitive_input(self, locator: Any) -> bool:
+        try:
+            attributes = {
+                "type": await locator.get_attribute("type"),
+                "name": await locator.get_attribute("name"),
+                "id": await locator.get_attribute("id"),
+                "autocomplete": await locator.get_attribute("autocomplete"),
+                "placeholder": await locator.get_attribute("placeholder"),
+                "aria_label": await locator.get_attribute("aria-label"),
+            }
+        except Exception:
+            return False
+
+        input_type = (attributes.get("type") or "").strip().lower()
+        if input_type == "password":
+            return True
+
+        autocomplete = (attributes.get("autocomplete") or "").strip().lower()
+        if autocomplete in {"current-password", "new-password", "one-time-code"}:
+            return True
+
+        haystack = " ".join(str(value or "") for value in attributes.values()).lower()
+        return bool(re.search(r"password|passcode|otp|one[- ]time|verification|token|secret|2fa|mfa", haystack))
 
     async def press(self, session_id: str, key: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
@@ -1273,6 +1330,8 @@ class BrowserManager:
         normalized = platform.strip().lower()
         if normalized == "twitter":
             return "x"
+        if normalized in {"microsoft", "live"}:
+            return "outlook"
         return normalized
 
     def _current_platform(self, session: BrowserSession) -> str | None:
@@ -1283,6 +1342,8 @@ class BrowserManager:
             return "instagram"
         if "linkedin.com" in host:
             return "linkedin"
+        if "outlook.live.com" in host or "outlook.office.com" in host or "outlook.office365.com" in host:
+            return "outlook"
         return None
 
     async def _persist_platform_auth_state(self, session: BrowserSession, platform: str) -> dict[str, Any]:
@@ -1686,6 +1747,45 @@ class BrowserManager:
                     'img.global-nav__me-photo',
                 ],
             }
+        if platform == "outlook":
+            return {
+                "login_url": "https://login.live.com/",
+                "username_selectors": [
+                    'input[name="loginfmt"]',
+                    'input[type="email"]',
+                    'input[autocomplete="username"]',
+                ],
+                "username_continue_selectors": [
+                    '#idSIButton9',
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button:has-text("Next")',
+                    'button:has-text("Sign in")',
+                ],
+                "password_selectors": [
+                    'input[name="passwd"]',
+                    'input[type="password"]',
+                    'input[autocomplete="current-password"]',
+                ],
+                "submit_selectors": [
+                    '#idSIButton9',
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button:has-text("Sign in")',
+                ],
+                "post_submit_selectors": [
+                    '#idSIButton9',
+                    'button:has-text("Yes")',
+                    'input[type="submit"][value="Yes"]',
+                ],
+                "login_url_tokens": ["login.live.com", "login.srf", "ppsecure"],
+                "success_selectors": [
+                    'button[aria-label*="New mail" i]',
+                    '[title="Inbox"]',
+                    'button[aria-label*="Account manager" i]',
+                    '[data-icon-name="MailRegular"]',
+                ],
+            }
         raise ValueError(f"Unsupported social platform: {platform}")
 
     def _platform_dm_compose_url(self, platform: str) -> str:
@@ -1704,6 +1804,7 @@ class BrowserManager:
         platform: str,
         username: str,
         password: str,
+        auth_profile: str | None = None,
         approval_id: str | None = None,
         totp_secret: str | None = None,
     ) -> dict[str, Any]:
@@ -1727,10 +1828,11 @@ class BrowserManager:
         target: dict[str, Any] = {"platform": platform_alias, "username": username}
         login_config = self._platform_login_config(platform_alias)
         auth_state_payload: dict[str, Any] = {}
+        saved_auth_profile: dict[str, Any] | None = None
         totp_used: dict[str, Any] | None = None
 
         async def operation() -> None:
-            nonlocal totp_used
+            nonlocal saved_auth_profile, totp_used
             if not any(token in session.page.url for token in login_config["login_url_tokens"]):
                 await session.page.goto(login_config["login_url"], wait_until="domcontentloaded")
                 await self._settle(session.page)
@@ -1781,6 +1883,17 @@ class BrowserManager:
 
             for _ in range(20):
                 await self._ensure_no_social_interlock(session, action="social_login")
+                post_submit_selectors = login_config.get("post_submit_selectors", [])
+                if post_submit_selectors:
+                    interstitial = await self._first_visible_locator(session.page, post_submit_selectors)
+                    if interstitial is not None:
+                        await self._submit_visible_button(
+                            session,
+                            action="social_login",
+                            selectors=post_submit_selectors,
+                        )
+                        await self._settle(session.page)
+                        continue
                 success = await self._first_visible_locator(session.page, login_config.get("success_selectors", []))
                 if success is not None:
                     target["success_selector"] = success[1]
@@ -1803,9 +1916,21 @@ class BrowserManager:
                 )
 
             auth_state_payload.update(await self._persist_platform_auth_state(session, platform_alias))
+            if auth_profile:
+                saved_auth_profile = await self._save_auth_profile_for_session(
+                    session,
+                    auth_profile,
+                    metadata={
+                        "platform": platform_alias,
+                        "username": username,
+                        "saved_via": "social_login",
+                    },
+                )
 
         result = await self._run_action(session, "social_login", target, operation)
         result["auth_state"] = auth_state_payload
+        if saved_auth_profile is not None:
+            result["saved_auth_profile"] = saved_auth_profile
         result["totp_used"] = totp_used
         if approval is not None:
             await self.approvals.mark_executed(approval.id)
@@ -2344,6 +2469,7 @@ class BrowserManager:
                 element_id=decision.element_id,
                 text=decision.text or "",
                 clear_first=decision.clear_first,
+                sensitive=decision.sensitive,
             )
         elif decision.action == "press":
             result = await self.press(session_id, decision.key or "")
@@ -2442,6 +2568,89 @@ class BrowserManager:
             )
             await self._persist_session(session, status="active")
             return payload
+
+    async def _save_auth_profile_for_session(
+        self,
+        session: BrowserSession,
+        profile_name: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_auth_profile_name(profile_name)
+        profile_state_path = self._auth_profile_state_base_path(normalized, create=True)
+        auth_info = await self.auth_state.write_storage_state(session.context, profile_state_path)
+        session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
+        session.auth_profile_name = normalized
+
+        profile_payload = {
+            "profile_name": normalized,
+            "last_saved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "saved_from_session_id": session.id,
+            "saved_from_url": session.page.url,
+            "saved_from_title": await session.page.title(),
+            "platform": self._current_platform(session),
+        }
+        if metadata:
+            profile_payload.update(metadata)
+
+        metadata_path = self._auth_profile_metadata_path(normalized, create=True)
+        metadata_path.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
+        return {
+            "profile_name": normalized,
+            "saved_to": auth_info["path"],
+            "auth_state": auth_info,
+            "metadata": profile_payload,
+        }
+
+    async def save_auth_profile(self, session_id: str, profile_name: str) -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        async with session.lock:
+            payload = await self._save_auth_profile_for_session(session, profile_name)
+            payload["session"] = await self._session_summary(session)
+            await self._append_jsonl(
+                session.artifact_dir / "actions.jsonl",
+                {"timestamp": self._timestamp(), "action": "save_auth_profile", **payload},
+            )
+            await self.audit.append(
+                event_type="auth_profile_saved",
+                status="ok",
+                action="save_auth_profile",
+                session_id=session.id,
+                details={"profile_name": payload["profile_name"], "saved_to": payload["saved_to"]},
+            )
+            await self._persist_session(session, status="active")
+            return payload
+
+    async def get_auth_profile(self, profile_name: str) -> dict[str, Any]:
+        normalized = self._normalize_auth_profile_name(profile_name)
+        profile_dir = self._auth_profile_dir(normalized, create=False)
+        metadata = self._read_auth_profile_metadata(normalized)
+        state_path = self._resolve_auth_profile_state_path(normalized, must_exist=False)
+        state_exists = state_path.exists()
+        if not state_exists and not metadata:
+            raise KeyError(normalized)
+        return {
+            "profile_name": normalized,
+            "profile_dir": str(profile_dir),
+            "auth_state": self.auth_state.inspect(state_path if state_exists else None),
+            "metadata": metadata,
+        }
+
+    async def list_auth_profiles(self) -> list[dict[str, Any]]:
+        root = self._auth_profile_root()
+        if not root.exists():
+            return []
+        profiles: list[dict[str, Any]] = []
+        for directory in sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name.lower()):
+            try:
+                profiles.append(await self.get_auth_profile(directory.name))
+            except KeyError:
+                continue
+        profiles.sort(
+            key=lambda item: (item.get("metadata") or {}).get("last_saved_at") or "",
+            reverse=True,
+        )
+        return profiles
 
     async def request_human_takeover(self, session_id: str, reason: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
@@ -2922,6 +3131,7 @@ class BrowserManager:
     def _session_auth_state_info(self, session: BrowserSession) -> dict[str, Any]:
         info = self.auth_state.inspect(session.last_auth_state_path)
         info["session_auth_root"] = str(session.auth_dir)
+        info["profile_name"] = session.auth_profile_name
         return info
 
     async def get_auth_state_info(self, session_id: str) -> dict[str, Any]:
@@ -3123,6 +3333,57 @@ class BrowserManager:
 
     def _session_upload_root(self, session_id: str) -> Path:
         return self._session_upload_root_for(self.settings.upload_root, session_id)
+
+    def _auth_profile_root(self) -> Path:
+        root = Path(self.settings.auth_root).resolve() / "profiles"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _normalize_auth_profile_name(profile_name: str) -> str:
+        normalized = profile_name.strip()
+        if not normalized:
+            raise ValueError("auth profile name is required")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", normalized):
+            raise ValueError("auth profile names may contain letters, numbers, dots, underscores, and hyphens")
+        return normalized
+
+    def _auth_profile_dir(self, profile_name: str, *, create: bool) -> Path:
+        normalized = self._normalize_auth_profile_name(profile_name)
+        root = self._auth_profile_root()
+        directory = (root / normalized).resolve()
+        if root not in directory.parents and directory != root:
+            raise PermissionError("auth profile path must stay inside auth root")
+        if create:
+            directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _auth_profile_metadata_path(self, profile_name: str, *, create: bool) -> Path:
+        return self._auth_profile_dir(profile_name, create=create) / "profile.json"
+
+    def _auth_profile_state_base_path(self, profile_name: str, *, create: bool) -> Path:
+        return self._auth_profile_dir(profile_name, create=create) / "state.json"
+
+    def _resolve_auth_profile_state_path(self, profile_name: str, *, must_exist: bool) -> Path:
+        base_path = self._auth_profile_state_base_path(profile_name, create=not must_exist)
+        candidates = [base_path.with_name(f"{base_path.name}.enc"), base_path]
+        existing = [candidate for candidate in candidates if candidate.exists()]
+        if existing:
+            existing.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
+            return existing[0]
+        if must_exist:
+            raise FileNotFoundError(base_path)
+        return base_path
+
+    def _read_auth_profile_metadata(self, profile_name: str) -> dict[str, Any]:
+        metadata_path = self._auth_profile_metadata_path(profile_name, create=False)
+        if not metadata_path.exists():
+            return {}
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _session_isolation(self, session: BrowserSession) -> dict[str, Any]:
         payload = {

@@ -17,12 +17,15 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             list_sessions=AsyncMock(return_value=[{"id": "session-1"}]),
             get_session_record=AsyncMock(return_value={"id": "session-1", "status": "active"}),
             observe=AsyncMock(return_value={"session": {"id": "session-1"}, "url": "https://example.com"}),
+            list_auth_profiles=AsyncMock(return_value=[{"profile_name": "outlook-default"}]),
+            get_auth_profile=AsyncMock(return_value={"profile_name": "outlook-default"}),
             list_tabs=AsyncMock(return_value=[{"index": 0, "active": True, "url": "https://example.com"}]),
             activate_tab=AsyncMock(return_value={"index": 1, "tabs": [{"index": 1, "active": True}]}),
             close_tab=AsyncMock(return_value={"closed_index": 1, "tabs": [{"index": 0, "active": True}]}),
             list_downloads=AsyncMock(return_value=[{"filename": "report.csv"}]),
             execute_decision=AsyncMock(return_value={"action": "click", "verification": {"verified": True}}),
             save_storage_state=AsyncMock(return_value={"saved_to": "/data/auth/session-1/state.json.enc"}),
+            save_auth_profile=AsyncMock(return_value={"profile_name": "outlook-default"}),
             request_human_takeover=AsyncMock(return_value={"takeover_url": "http://127.0.0.1:6080/vnc.html"}),
             close_session=AsyncMock(return_value={"closed": True}),
             scroll_feed=AsyncMock(return_value={"action": "scroll_feed"}),
@@ -65,9 +68,12 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         names = {tool["name"] for tool in tools}
 
         self.assertIn("browser.create_session", names)
+        self.assertIn("browser.list_auth_profiles", names)
+        self.assertIn("browser.get_auth_profile", names)
         self.assertIn("browser.list_tabs", names)
         self.assertIn("browser.list_downloads", names)
         self.assertIn("browser.execute_action", names)
+        self.assertIn("browser.save_auth_profile", names)
         self.assertIn("browser.list_agent_jobs", names)
         self.assertIn("browser.get_remote_access", names)
         self.assertIn("social.post", names)
@@ -104,6 +110,27 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(called_args[1], BrowserActionDecision)
         self.assertEqual(called_args[1].element_id, "op-123")
 
+    async def test_auth_profile_tools_forward_arguments(self) -> None:
+        list_response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.list_auth_profiles", arguments={})
+        )
+        get_response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.get_auth_profile", arguments={"profile_name": "outlook-default"})
+        )
+        save_response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.save_auth_profile",
+                arguments={"session_id": "session-1", "profile_name": "outlook-default"},
+            )
+        )
+
+        self.assertFalse(list_response.isError)
+        self.assertFalse(get_response.isError)
+        self.assertFalse(save_response.isError)
+        self.manager.list_auth_profiles.assert_awaited_once()
+        self.manager.get_auth_profile.assert_awaited_once_with("outlook-default")
+        self.manager.save_auth_profile.assert_awaited_once_with("session-1", "outlook-default")
+
     async def test_create_session_forwards_proxy_and_user_agent_options(self) -> None:
         response = await self.gateway.call_tool(
             McpToolCallRequest(
@@ -111,6 +138,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 arguments={
                     "name": "session-1",
                     "start_url": "https://example.com",
+                    "auth_profile": "outlook-default",
                     "proxy_server": "http://proxy.internal:8080",
                     "proxy_username": "alice",
                     "proxy_password": "secret",
@@ -125,6 +153,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             name="session-1",
             start_url="https://example.com",
             storage_state_path=None,
+            auth_profile="outlook-default",
             request_proxy_server="http://proxy.internal:8080",
             request_proxy_username="alice",
             request_proxy_password="secret",
@@ -250,6 +279,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "platform": "x",
                     "username": "alice",
                     "password": "secret-password",
+                    "auth_profile": "outlook-default",
                     "approval_id": "approval-login-1",
                     "totp_secret": "JBSWY3DPEHPK3PXP",
                 },
@@ -262,6 +292,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             platform="x",
             username="alice",
             password="secret-password",
+            auth_profile="outlook-default",
             approval_id="approval-login-1",
             totp_secret="JBSWY3DPEHPK3PXP",
         )

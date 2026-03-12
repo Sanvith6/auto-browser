@@ -166,3 +166,37 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
 
         payload = await self.manager.save_storage_state(session.id, "state.json")
         self.assertIn(f"/session-scope/state.json", payload["saved_to"])
+
+    async def test_save_auth_profile_persists_reusable_profile(self) -> None:
+        artifact_dir = Path(self.settings.artifact_root) / "session-profile"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        context = FakeContext()
+        session = BrowserSession(
+            id="session-profile",
+            name="session-profile",
+            created_at=datetime.now(UTC),
+            context=context,  # type: ignore[arg-type]
+            page=FakePage("https://outlook.live.com/mail/0/"),  # type: ignore[arg-type]
+            artifact_dir=artifact_dir,
+            auth_dir=Path(self.settings.auth_root) / "session-profile",
+            upload_dir=Path(self.settings.upload_root) / "session-profile",
+            takeover_url="http://127.0.0.1:6080/vnc.html",
+            trace_path=artifact_dir / "trace.zip",
+        )
+        session.auth_dir.mkdir(parents=True, exist_ok=True)
+        session.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.manager.sessions[session.id] = session
+        self.manager._append_jsonl = AsyncMock()  # type: ignore[method-assign]
+
+        payload = await self.manager.save_auth_profile(session.id, "outlook-default")
+
+        self.assertEqual(payload["profile_name"], "outlook-default")
+        self.assertIn("/profiles/outlook-default/state.json", payload["saved_to"])
+        profile = await self.manager.get_auth_profile("outlook-default")
+        self.assertEqual(profile["profile_name"], "outlook-default")
+        self.assertEqual(profile["metadata"]["saved_from_session_id"], session.id)
+        self.assertEqual(profile["metadata"]["platform"], "outlook")
+        self.assertEqual(session.auth_profile_name, "outlook-default")
+
+        profiles = await self.manager.list_auth_profiles()
+        self.assertEqual([item["profile_name"] for item in profiles], ["outlook-default"])

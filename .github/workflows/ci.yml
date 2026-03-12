@@ -29,8 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run isolated compose smoke test
-        run: API_PORT=8010 ./scripts/smoke_isolated_session.sh
+      - name: Run doctor smoke test
+        run: ./scripts/doctor.sh
 
       - name: Run isolated session smoke test
         run: API_PORT=8010 ./scripts/smoke_isolated_session.sh

@@ -65,6 +65,19 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(protected_file.exists())
         self.assertEqual(report["roots"][2]["skipped_protected"], 1)
 
+    async def test_cleanup_skips_saved_auth_profiles(self) -> None:
+        profile_dir = Path(self.settings.auth_root) / "profiles" / "outlook-default"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_state = profile_dir / "state.json"
+        profile_state.write_text("{}", encoding="utf-8")
+        ancient = 1_000_000_000
+        utime(profile_state, (ancient, ancient))
+
+        report = await self.service.run_cleanup()
+
+        self.assertTrue(profile_state.exists())
+        self.assertGreaterEqual(report["roots"][2]["skipped_protected"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
