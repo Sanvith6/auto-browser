@@ -4,7 +4,7 @@ Use this when you are ready to make the repo public.
 
 ## Suggested one-line description
 
-Open-source MCP-native browser agent with human takeover, approvals, and reusable auth profiles.
+Give your AI agent a real browser — with a human in the loop.
 
 ## Suggested longer description
 
@@ -22,6 +22,8 @@ Auto Browser is an open-source MCP-native control plane for authorized browser w
 - operator-tools
 - noVNC
 - docker
+- self-hosted
+- claude
 
 ## Suggested launch bullets
 
@@ -33,6 +35,22 @@ Auto Browser is an open-source MCP-native control plane for authorized browser w
 - reusable auth profiles
 - approval and audit rails
 - MCP + REST API
+
+## Suggested release tag
+
+Use `v0.1.0`, not `v1.0.0`.
+
+It reads as a serious first public release without overclaiming maturity.
+
+## Suggested launch timing
+
+- Tuesday to Thursday
+- 8am–10am US Eastern for Hacker News
+- post to HN + Reddit + X/Discord the same day
+
+## Suggested first public issues
+
+See `docs/good-first-issues.md`.
 
 ## Public launch checklist
 

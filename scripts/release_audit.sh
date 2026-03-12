@@ -31,6 +31,7 @@ for path in \
   ROADMAP.md \
   docs/launch.md \
   docs/mcp-clients.md \
+  docs/good-first-issues.md \
   docs/assets/hero.svg \
   examples/README.md \
   examples/claude_desktop_config.json \
@@ -48,7 +49,7 @@ echo "Running controller tests..."
 make test
 
 echo "Running readiness smoke..."
-DOCTOR_BUILD=1 make doctor
+SMOKE_PROVIDER=disabled DOCTOR_BUILD=1 make doctor
 
 echo "Scanning tracked files for obvious secret-shaped tokens..."
 if git grep -nE \

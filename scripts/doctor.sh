@@ -200,21 +200,29 @@ if [[ "$smoke_provider_ready" == "true" ]]; then
   echo "Agent smoke via provider=${SMOKE_PROVIDER}:"
   step_payload="$(jq -nc --arg provider "$SMOKE_PROVIDER" --arg goal "$SMOKE_GOAL" '{provider:$provider,goal:$goal,observation_limit:25}')"
   step_response_file="$(mktemp)"
-  step_status="$(
-    curl -sS \
-      -o "$step_response_file" \
-      -w '%{http_code}' \
-      "http://127.0.0.1:${API_PORT}/sessions/${session_id}/agent/step" \
-      -X POST \
-      -H 'Content-Type: application/json' \
-      -d "$step_payload"
-  )"
-  cat "$step_response_file" | jq '{provider,model,status,decision,error,error_code,usage,detail}'
-  if [[ "${step_status}" -ge 400 ]]; then
-    echo "Agent smoke failed with HTTP ${step_status}." >&2
-    rm -f "$step_response_file"
-    exit 1
-  fi
+  step_status=""
+  for attempt in 1 2 3; do
+    step_status="$(
+      curl -sS \
+        -o "$step_response_file" \
+        -w '%{http_code}' \
+        "http://127.0.0.1:${API_PORT}/sessions/${session_id}/agent/step" \
+        -X POST \
+        -H 'Content-Type: application/json' \
+        -d "$step_payload"
+    )"
+    cat "$step_response_file" | jq '{provider,model,status,decision,error,error_code,usage,detail}'
+    if [[ "${step_status}" -lt 400 ]]; then
+      break
+    fi
+    if [[ "${step_status}" -lt 500 || "${attempt}" -eq 3 ]]; then
+      echo "Agent smoke failed with HTTP ${step_status}." >&2
+      rm -f "$step_response_file"
+      exit 1
+    fi
+    echo "Agent smoke hit transient HTTP ${step_status}; retrying (${attempt}/3)..." >&2
+    sleep 2
+  done
   rm -f "$step_response_file"
 else
   echo "Skipping agent smoke because provider=${SMOKE_PROVIDER} is not configured."

@@ -7,15 +7,9 @@
 
 ![Auto Browser hero](docs/assets/hero.svg)
 
-Open-source **MCP-native browser agent** for authorized workflows.
+> **Give your AI agent a real browser — with a human in the loop.**
 
-Auto Browser gives MCP clients, LLMs, and human operators a shared Playwright-powered browser with:
-- screen-aware observations
-- reusable auth profiles
-- human takeover via noVNC
-- approval rails for risky actions
-- MCP + REST interfaces
-- durable artifacts, sessions, and audit history
+Open-source **MCP-native browser agent** for authorized workflows.
 
 Works with:
 - Claude Desktop
@@ -23,11 +17,52 @@ Works with:
 - any MCP client that can speak JSON-RPC tools
 - direct REST callers when you want curl-first control
 
+## Why Auto Browser?
+
+- **MCP-native, not bolted on later.** Use it from Claude Desktop, Cursor, or any MCP client.
+- **Human takeover when the web gets weird.** noVNC lets you recover from brittle flows without losing the session.
+- **Login once, reuse later.** Save named auth profiles and reopen fresh sessions already signed in.
+
 If you want one clean mental model, this repo is:
 
 > **browser agent as an MCP server**
 
-This scaffold gives you:
+## 3-command quickstart
+
+```bash
+git clone https://github.com/LvcidPsyche/auto-browser.git
+cd auto-browser
+docker compose up --build
+```
+
+That works with **zero config for local dev**.
+
+Optional sanity check:
+
+```bash
+make doctor
+```
+
+Open:
+- API docs: `http://localhost:8000/docs`
+- Visual takeover: `http://localhost:6080/vnc.html?autoconnect=true&resize=scale`
+
+All published ports bind to `127.0.0.1` by default.
+
+Only copy `.env.example` if you want to change ports, providers, or allowed hosts:
+
+```bash
+cp .env.example .env
+```
+
+To see the rest of the common commands:
+
+```bash
+make help
+```
+
+## What’s included
+
 - a **browser node** with Chromium, Xvfb, x11vnc, and noVNC
 - a **controller API** built on FastAPI + Playwright
 - **screen-aware observations** with screenshots and interactable element IDs
@@ -89,42 +124,10 @@ See:
 - `docs/mcp-clients.md` for MCP client integration notes
 - `docs/production-hardening.md` for the production target/spec
 - `docs/deployment.md` for the deployment and credential handoff checklist
+- `docs/good-first-issues.md` for contributor-friendly starter work
 - `examples/README.md` for curl-first examples
 - `ROADMAP.md` for project direction
 - `CONTRIBUTING.md` if you want to help
-
-## 60-second quickstart
-
-```bash
-cd auto-browser
-docker compose up --build
-```
-
-That works with **zero config for local dev**.
-
-Only copy `.env.example` if you want to change ports, providers, or allowed hosts:
-
-```bash
-cp .env.example .env
-```
-
-Open:
-- API docs: `http://localhost:8000/docs`
-- Visual takeover: `http://localhost:6080/vnc.html?autoconnect=true&resize=scale`
-
-All published ports bind to `127.0.0.1` by default.
-
-Then run the readiness smoke:
-
-```bash
-make doctor
-```
-
-To see the rest of the common commands:
-
-```bash
-make help
-```
 
 ## Quick demo flow
 
