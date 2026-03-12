@@ -177,6 +177,43 @@ curl -fsS http://127.0.0.1:8000/maintenance/status | jq
 
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
+## Common pitfalls and failure modes
+
+### Browser session dies or Chromium crashes
+
+- recreate the session first; do not assume browser state is still valid
+- check controller logs and browser-node logs before retrying the same action loop
+- inspect the latest artifacts/screenshots to confirm where the flow broke
+
+### Saved auth profile stops working
+
+- the site may have expired cookies, revoked the session, or triggered MFA again
+- recreate the profile with a fresh manual login
+- avoid reusing one profile across multiple unrelated accounts or workflows
+
+### noVNC works locally but not remotely
+
+- keep controller and noVNC ports bound to `127.0.0.1`
+- verify your access layer first: Cloudflare Access, Tailscale, or reverse tunnel
+- if remote takeover breaks, treat it as a gateway/tunnel problem before debugging Playwright
+
+### Production boot fails closed
+
+- this is intentional in `APP_ENV=production`
+- check required env vars first: bearer token, operator ID enforcement, encryption key, rate limiting
+- if using `*_AUTH_MODE=cli` or `host_bridge`, verify the expected auth files or socket actually exist
+
+### Actions fail after redirects or external handoffs
+
+- update `ALLOWED_HOSTS` to include the real target domains involved in login, redirects, uploads, and downloads
+- remember that identity providers, CDNs, and file hosts may differ from the main app domain
+
+### OCR output looks incomplete or wrong
+
+- Tesseract OCR is helpful, not authoritative
+- use screenshots and DOM observations as the primary source of truth
+- expect worse OCR quality on small text, low-contrast UIs, and dense dashboards
+
 ## Gateway recommendations
 
 Use **one** of:

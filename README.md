@@ -129,6 +129,7 @@ See:
 - `docs/good-first-issues.md` for contributor-friendly starter work
 - `examples/README.md` for curl-first examples
 - `ROADMAP.md` for project direction
+- `CODE_OF_CONDUCT.md` for community expectations
 - `CONTRIBUTING.md` if you want to help
 
 ## Quick demo flow
@@ -142,6 +143,10 @@ The fastest way to understand the project:
 5. reopen a new session from that saved profile
 
 That flow is what makes the project actually useful in day-to-day work.
+
+If you want the shortest copy-paste curl walkthrough for that pattern, start with:
+
+- `examples/login-and-save-profile.md`
 
 ## Real demo flow
 

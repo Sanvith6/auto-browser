@@ -2,6 +2,8 @@
 
 Thanks for helping make Auto Browser better.
 
+Please also read `CODE_OF_CONDUCT.md`.
+
 ## What this project is
 
 Auto Browser is an open-source, supervised browser control plane for authorized workflows.
