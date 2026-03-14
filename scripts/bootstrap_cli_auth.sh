@@ -14,8 +14,12 @@ Usage:
 
 What it does:
   Opens the requested provider CLI interactively inside the controller image with
-  HOME=$CLI_HOME (default /data/cli-home) so the login/session state persists in
-  the matching host path.
+  HOME=$CLI_HOME (default /data/cli-home).
+
+  This helper only supports writable CLI_HOME paths under /data/... because the
+  default compose stack mounts ./data at /data inside the controller container.
+  If you use the host-subscriptions override with a host-style CLI_HOME such as
+  /home/youruser, sign in on the host first instead of using this helper.
 
 Examples:
   ./scripts/bootstrap_cli_auth.sh codex
@@ -77,6 +81,12 @@ for provider in "${providers[@]}"; do
 done
 
 container_cli_home="${CLI_HOME:-/data/cli-home}"
+if [[ "$container_cli_home" != /data/* ]]; then
+  echo >&2 "bootstrap_cli_auth.sh only supports CLI_HOME paths under /data/."
+  echo >&2 "Current CLI_HOME=${container_cli_home}"
+  echo >&2 "Use CLI_HOME=/data/cli-home for in-container bootstrap, or sign in on the host and use docker-compose.host-subscriptions.yml."
+  exit 1
+fi
 host_cli_home="$(resolve_repo_host_path "$ROOT_DIR" "$container_cli_home")"
 mkdir -p "$host_cli_home"
 

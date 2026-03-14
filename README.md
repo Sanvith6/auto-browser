@@ -336,7 +336,7 @@ rsync -a ~/.claude data/cli-home/.claude
 rsync -a ~/.gemini data/cli-home/.gemini
 ```
 
-If you just want to sign in interactively on this host, use the included bootstrap helper instead. It opens the CLI inside the controller image with `HOME=/data/cli-home`, so the login state lands exactly where Auto Browser expects it:
+If you just want to sign in interactively on this host, use the included bootstrap helper instead. It is meant for the default writable `/data/...` auth-cache flow and opens the CLI inside the controller image with `HOME=$CLI_HOME` (normally `/data/cli-home`), so the login state lands exactly where Auto Browser expects it:
 
 ```bash
 ./scripts/bootstrap_cli_auth.sh codex
@@ -361,7 +361,7 @@ That override:
 - sets `CLI_HOME` to the host-style home path inside the container
 - behaves much more like running the CLIs directly on the host
 
-If your host home is not `/home/youruser`, set `CLI_HOST_HOME` first.
+If your host home is not `/home/youruser`, set `CLI_HOST_HOME` first. Do not use `bootstrap_cli_auth.sh` in this mode; sign in on the host first and then start the override.
 
 If Codex subscription auth still does not survive inside Docker cleanly, use the host-side bridge instead. It runs `codex` on the host and exposes a Unix socket through the shared `./data` mount:
 
