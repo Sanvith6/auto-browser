@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+compose_out="$(mktemp)"
+compose_isolation_out="$(mktemp)"
+secrets_out="$(mktemp)"
+cleanup() {
+  rm -f "$compose_out" "$compose_isolation_out" "$secrets_out"
+}
+trap cleanup EXIT
+
 require_bin() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
@@ -42,8 +50,8 @@ for path in \
 done
 
 echo "Validating compose configs..."
-./scripts/compose_local.sh config >/tmp/auto-browser-compose.out
-./scripts/compose_local.sh -f docker-compose.yml -f docker-compose.isolation.yml config >/tmp/auto-browser-compose-isolation.out
+./scripts/compose_local.sh config >"$compose_out"
+./scripts/compose_local.sh -f docker-compose.yml -f docker-compose.isolation.yml config >"$compose_isolation_out"
 
 echo "Running controller tests..."
 make test
@@ -54,8 +62,8 @@ SMOKE_PROVIDER=disabled DOCTOR_BUILD=1 make doctor
 echo "Scanning tracked files for obvious secret-shaped tokens..."
 if git grep -nE \
   'sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}' \
-  -- . >/tmp/auto-browser-release-audit-secrets.out; then
-  cat /tmp/auto-browser-release-audit-secrets.out >&2
+  -- . >"$secrets_out"; then
+  cat "$secrets_out" >&2
   echo "Release audit failed: potential secret-shaped token found." >&2
   exit 1
 fi

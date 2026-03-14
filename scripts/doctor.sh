@@ -4,14 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ -f .env ]]; then
-  while IFS= read -r line; do
-    [[ -z "$line" || "${line#\#}" != "$line" || "$line" != *=* ]] && continue
-    key="${line%%=*}"
-    value="${line#*=}"
-    export "$key=$value"
-  done < .env
-fi
+source "$ROOT_DIR/scripts/load_env.sh"
+load_repo_env "$ROOT_DIR/.env"
 
 require_bin() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -93,6 +87,19 @@ if b"200 OK" not in payload:
 PY
 }
 
+resolve_host_path() {
+  local raw_path="$1"
+  if [[ "$raw_path" == /data/* ]]; then
+    echo "$ROOT_DIR/data/${raw_path#/data/}"
+    return 0
+  fi
+  if [[ "$raw_path" == /* ]]; then
+    echo "$raw_path"
+    return 0
+  fi
+  echo "$ROOT_DIR/$raw_path"
+}
+
 require_bin docker
 require_bin curl
 require_bin jq
@@ -145,10 +152,7 @@ if [[ -n "$current_controller_port" ]]; then
 fi
 
 if [[ "$OPENAI_AUTH_MODE" == "host_bridge" ]]; then
-  host_socket_path="$ROOT_DIR/${OPENAI_HOST_BRIDGE_SOCKET#/data/}"
-  if [[ "$OPENAI_HOST_BRIDGE_SOCKET" == /data/* ]]; then
-    host_socket_path="$ROOT_DIR/data/${OPENAI_HOST_BRIDGE_SOCKET#/data/}"
-  fi
+  host_socket_path="$(resolve_host_path "$OPENAI_HOST_BRIDGE_SOCKET")"
   if [[ ! -S "$host_socket_path" ]]; then
     echo "Host bridge socket missing at $host_socket_path" >&2
     echo "Start the bridge first, for example:" >&2
