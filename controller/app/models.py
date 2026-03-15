@@ -63,7 +63,7 @@ class HoverRequest(BaseModel):
 
 
 class WaitRequest(BaseModel):
-    wait_ms: int = Field(ge=0, le=30000, description="Milliseconds to wait (max 30s)")
+    wait_ms: int = Field(default=0, ge=0, le=30000, description="Milliseconds to wait (max 30s)")
 
 
 class NavigateRequest(BaseModel):
