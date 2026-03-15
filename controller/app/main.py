@@ -24,6 +24,7 @@ from .models import (
     ClickRequest,
     CreateSessionRequest,
     ExecuteActionRequest,
+    HoverRequest,
     HumanTakeoverRequest,
     McpToolCallRequest,
     NavigateRequest,
@@ -32,6 +33,7 @@ from .models import (
     SaveStorageStateRequest,
     ScreenshotRequest,
     ScrollRequest,
+    SelectOptionRequest,
     SocialCommentRequest,
     SocialDmRequest,
     SocialLoginRequest,
@@ -45,6 +47,7 @@ from .models import (
     TabIndexRequest,
     TypeRequest,
     UploadRequest,
+    WaitRequest,
 )
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
@@ -599,6 +602,91 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
         raise HTTPException(status_code=409, detail=exc.payload) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/actions/hover")
+async def hover(session_id: str, payload: HoverRequest) -> dict:
+    try:
+        return await manager.hover(
+            session_id,
+            selector=payload.selector,
+            element_id=payload.element_id,
+            x=payload.x,
+            y=payload.y,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+
+
+@app.post("/sessions/{session_id}/actions/select-option")
+async def select_option(session_id: str, payload: SelectOptionRequest) -> dict:
+    try:
+        return await manager.select_option(
+            session_id,
+            selector=payload.selector,
+            element_id=payload.element_id,
+            value=payload.value,
+            label=payload.label,
+            index=payload.index,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+
+
+@app.post("/sessions/{session_id}/actions/wait")
+async def wait(session_id: str, payload: WaitRequest) -> dict:
+    try:
+        return await manager.wait(session_id, payload.wait_ms)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.post("/sessions/{session_id}/actions/reload")
+async def reload(session_id: str) -> dict:
+    try:
+        return await manager.reload(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+
+
+@app.post("/sessions/{session_id}/actions/go-back")
+async def go_back(session_id: str) -> dict:
+    try:
+        return await manager.go_back(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
+
+
+@app.post("/sessions/{session_id}/actions/go-forward")
+async def go_forward(session_id: str) -> dict:
+    try:
+        return await manager.go_forward(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApprovalRequiredError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload) from exc
 
 
 @app.post("/sessions/{session_id}/social/scroll")

@@ -6,7 +6,7 @@ import httpx
 
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
-from .models import AgentRunResult, AgentStepResult, BrowserActionDecision, ProviderName
+from .models import AgentRunResult, AgentStepResult, ProviderName
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
 

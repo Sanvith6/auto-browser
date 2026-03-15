@@ -11,7 +11,6 @@ from .approvals import ApprovalRequiredError
 from .models import (
     AgentRunRequest,
     AgentStepRequest,
-    ApprovalDecisionRequest,
     BrowserActionDecision,
     CreateSessionRequest,
     McpToolCallContent,

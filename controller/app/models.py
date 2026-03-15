@@ -55,6 +55,17 @@ class SelectOptionRequest(BaseModel):
     index: int | None = Field(default=None, ge=0)
 
 
+class HoverRequest(BaseModel):
+    selector: str | None = None
+    element_id: str | None = None
+    x: float | None = None
+    y: float | None = None
+
+
+class WaitRequest(BaseModel):
+    wait_ms: int = Field(ge=0, le=30000, description="Milliseconds to wait (max 30s)")
+
+
 class NavigateRequest(BaseModel):
     url: str
 
