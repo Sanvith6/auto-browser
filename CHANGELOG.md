@@ -2,6 +2,33 @@
 
 All notable changes to auto-browser are documented here.
 
+## [0.4.0] — 2026-03-23
+
+### Added
+
+#### Open New Tab
+`POST /sessions/{id}/tabs/open` — open a new browser tab in the session's existing context.
+- `url` (optional) — navigate to a URL immediately after opening
+- `activate` (bool, default `true`) — make the new tab the active page
+- New tab inherits cookies and auth state from the session automatically
+- Returns updated tab list and session summary
+
+Completes the tab management surface: list (`GET`), open, activate, close.
+
+#### Session Replay View
+`GET /sessions/{id}/replay` — dark-mode HTML page for reviewing a session after the fact.
+- Screenshot gallery (chronological, sourced from `/artifacts/{id}/`)
+- Audit event timeline with timestamp, type, operator, and data excerpt
+- Session metadata header (status, title, created time, current URL)
+
+Useful for debugging agent runs and as a demo/handoff surface.
+
+### Fixed
+- `AUDIT_ROOT` now included in all test `Settings` instantiations that construct `BrowserManager`,
+  resolving `PermissionError: /data` failures in the local (non-Docker) test suite. 149 tests passing.
+
+---
+
 ## [0.3.0] — 2026-03-18
 
 ### Added

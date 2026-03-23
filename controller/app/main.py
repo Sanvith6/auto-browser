@@ -96,7 +96,7 @@ mcp_transport = McpHttpTransport(
     tool_gateway=tool_gateway,
     server_name="auto-browser",
     server_title="Auto Browser MCP",
-    server_version="0.3.0",
+    server_version="0.4.0",
     allowed_origins=settings.mcp_allowed_origin_list,
     session_store_path=settings.mcp_session_store_path,
 )
@@ -122,7 +122,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Auto Browser Controller",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
     summary="Visual Auto Browser control plane for LLM workflows.",
 )
