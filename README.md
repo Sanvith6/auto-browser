@@ -64,15 +64,20 @@ To see the rest of the common commands:
 make help
 ```
 
-## What’s new in v0.3.0
+## What’s new in v0.5.0
 
-- **Operator Dashboard** at `/ui/` — dark-mode session monitor with live screenshot, SSE event log, and one-click approval decisions
-- **Perception Presets** — `fast` (screenshot only, <200ms), `normal` (default), `rich` (extended context). Set per-request via `POST /sessions/{id}/observe`
-- **SSE Event Stream** — `GET /sessions/{id}/events` for live observe/action/approval events. Powers the dashboard and external monitoring
-- **Screenshot Diff** — `POST /sessions/{id}/screenshot/compare` — pixel diff against prior screenshot with change percentage
-- **Approval Webhooks** — `APPROVAL_WEBHOOK_URL` + `APPROVAL_WEBHOOK_SECRET` for Slack-compatible signed notifications when approvals are needed
-- **Auth Profile Export/Import** — `GET /auth-profiles/{name}/export` and `POST /auth-profiles/import` for portable auth state
-- **Python Client SDK** — `pip install auto-browser-client` — sync and async, SSE streaming, full coverage
+- **CDP Connect Mode** — attach to an existing Chrome via `--remote-debugging-port` instead of launching a new one
+- **Network Inspector** — per-session request/response capture with header masking and PII scrubbing
+- **PII Scrubbing Layer** — 16 pattern classes (AWS keys, JWTs, credit cards, SSNs, emails…); pixel redaction on screenshots; console + network body scrubbing
+- **Proxy Partitioning** — named proxy personas for per-agent static IPs, preventing shared network footprints
+- **Shadow Browsing** — flip a headless session to a headed (visible) browser mid-run for live debugging
+- **Session Forking** — branch a session’s auth state (cookies + storage) into a new independent session
+- **Playwright Script Export** — `GET /sessions/{id}/export-script` downloads the session as runnable Python
+- **Shared Session Links** — HMAC-signed, TTL-enforced observer tokens for team handoffs
+- **Vision-Grounded Targeting** — `browser.find_by_vision` uses Claude Vision to locate elements by natural language description
+- **Cron + Webhook Triggers** — APScheduler-backed autonomous jobs; HMAC webhook keys; full CRUD at `/crons`
+- **MCP Resources Protocol** — `resources/list` + `resources/read` expose live screenshot, DOM, console, and network log as MCP resources
+- **30+ new MCP tools** — eval_js, get_html, find_elements, drag_drop, set_viewport, cookies/storage R/W, and more
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
@@ -101,6 +106,18 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 - a browser-node managed **Playwright server endpoint** so the controller connects over Playwright protocol instead of CDP
 - optional **docker-ephemeral per-session browser isolation** with dedicated noVNC ports
 - a **real MCP JSON-RPC transport** at `/mcp`, plus convenience endpoints at `/mcp/tools` + `/mcp/tools/call`
+- **CDP connect mode** — attach to an existing Chrome instance instead of launching a new one
+- **network inspector** — per-session request/response capture with PII scrubbing and header masking
+- **PII scrubbing layer** — 16 pattern classes with Pillow pixel redaction on screenshots
+- **proxy partitioning** — named proxy personas for per-agent static IP assignment
+- **shadow browsing** — flip headless → headed mid-run for live visual debugging
+- **session forking** — clone auth state into a new independent session branch
+- **Playwright script export** — download any session as a runnable `.py` file
+- **shared session links** — HMAC-signed, TTL-bound observer tokens
+- **vision-grounded targeting** — Claude Vision locates elements by natural language
+- **cron + webhook triggers** — autonomous scheduled browser jobs via APScheduler
+- **MCP Resources Protocol** — live screenshot, DOM, console, network as `browser://` resources
+- **30+ MCP tools** — `eval_js`, `get_html`, `find_elements`, `drag_drop`, cookies/storage R/W, and more
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
 
@@ -233,15 +250,20 @@ Then:
 
 ### Tool surface
 
-The default MCP tool profile is intentionally **curated**.
+The default MCP tool profile exposes **32 tools** covering:
 
-- small browser-first surface
-- auth profile reuse
-- screenshot + observe
-- human takeover
-- no internal queue/provider/admin tools by default
+- session lifecycle, navigation, observation
+- click, type, hover, scroll, select, drag-drop, eval JS
+- screenshot, DOM access, cookies, local/session storage
+- network log inspection, console log access
+- auth profiles, proxy personas, session forking
+- vision-grounded element targeting
+- cron job management, shared session links
+- Playwright script export, shadow browsing
 
-If you want the entire legacy/internal tool surface, set:
+Internal queue/provider/admin tools are hidden by default.
+
+If you want the entire internal tool surface, set:
 
 ```bash
 MCP_TOOL_PROFILE=full
