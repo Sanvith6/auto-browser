@@ -64,6 +64,23 @@ To see the rest of the common commands:
 make help
 ```
 
+## What’s new in v0.5.1
+
+**Maintenance release — no API changes, all fixes are backwards compatible.**
+
+- **`network_inspector` pending leak fixed** — in-flight requests are now flushed as `failed` when a session is detached (tab close, crash), preventing unbounded memory growth
+- **Global `KeyError → 404` handler** — all store-layer `KeyError` raises are now handled uniformly; ~30 route handlers simplified
+- **`_WithApproval` mixin** — 9 social action models and `UploadRequest` no longer repeat `approval_id: str | None = None`
+- **`_MarkInterruptedMixin`** — `mark_all_active_interrupted` extracted from the three session store classes that each had identical copies
+- **`utils.utc_now()`** — shared ISO-8601 timestamp helper; `_timestamp()` removed from 5 modules
+- **`tool_inputs.py`** — Pydantic input models split from `tool_gateway.py` (dispatch logic vs. schema definitions)
+- **`create_session` decomposed** — 190-line method split into 4 focused private helpers
+- **`agent_jobs.py` cleanup** — dead `hasattr` guard deleted; `enqueue_step`/`enqueue_run` merged
+
+All 149 tests pass.
+
+---
+
 ## What’s new in v0.5.0
 
 - **CDP Connect Mode** — attach to an existing Chrome via `--remote-debugging-port` instead of launching a new one

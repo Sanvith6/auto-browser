@@ -82,7 +82,7 @@ class NetworkInspector:
         page.on("requestfinished", self._on_request_finished)
 
     def detach(self) -> None:
-        """Remove listeners from the attached page."""
+        """Remove listeners from the attached page and flush any in-flight entries."""
         if self._page is None:
             return
         try:
@@ -93,6 +93,8 @@ class NetworkInspector:
         except Exception:
             pass
         self._page = None
+        # Drain pending entries — requestfailed/requestfinished will never fire after detach
+        asyncio.ensure_future(self._flush_pending())
 
     def entries(self, limit: int = 100, method: str | None = None, url_contains: str | None = None) -> list[dict[str, Any]]:
         """Return captured network entries, most recent first."""
@@ -102,6 +104,17 @@ class NetworkInspector:
         if url_contains:
             items = [e for e in items if url_contains in e.get("url", "")]
         return list(reversed(items))[:limit]
+
+    async def _flush_pending(self) -> None:
+        """Move all pending entries into the log as failed — called on detach."""
+        async with self._lock:
+            for entry in self._pending.values():
+                entry["failed"] = True
+                entry["failure_text"] = "session detached"
+                entry["duration_ms"] = _elapsed_ms(entry)
+                entry.pop("_started_at", None)
+                self._log.append(entry)
+            self._pending.clear()
 
     def clear(self) -> None:
         self._log.clear()

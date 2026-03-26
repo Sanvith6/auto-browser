@@ -70,7 +70,7 @@ from .tool_gateway import McpToolGateway
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_VERSION = "0.5.0"
+_VERSION = "0.5.1"
 
 settings = get_settings()
 manager = BrowserManager(settings)
@@ -158,6 +158,12 @@ app.mount("/artifacts", StaticFiles(directory=settings.artifact_root), name="art
 _UI_DIR = Path(__file__).parent / "ui"
 if _UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
+
+
+@app.exception_handler(KeyError)
+async def handle_key_not_found(_: Request, exc: KeyError) -> JSONResponse:
+    key = exc.args[0] if exc.args else "unknown"
+    return JSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
 
 
 @app.exception_handler(SocialActionError)
@@ -330,10 +336,7 @@ async def list_agent_jobs(status: str | None = None, session_id: str | None = No
 
 @app.get("/agent/jobs/{job_id}")
 async def get_agent_job(job_id: str) -> dict:
-    try:
-        return await job_queue.get_job(job_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}") from exc
+    return await job_queue.get_job(job_id)
 
 
 @app.get("/remote-access")
@@ -369,18 +372,13 @@ async def list_approvals(status: str | None = None, session_id: str | None = Non
 
 @app.get("/approvals/{approval_id}")
 async def get_approval(approval_id: str) -> dict:
-    try:
-        return await manager.get_approval(approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
+    return await manager.get_approval(approval_id)
 
 
 @app.post("/approvals/{approval_id}/approve")
 async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict:
     try:
         return await manager.approve(approval_id, comment=payload.comment)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -389,8 +387,6 @@ async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -
 async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict:
     try:
         return await manager.reject(approval_id, comment=payload.comment)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -399,8 +395,6 @@ async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) ->
 async def execute_approval(approval_id: str) -> dict:
     try:
         return await manager.execute_approval(approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown approval: {approval_id}") from exc
     except ApprovalRequiredError as exc:
         raise HTTPException(status_code=409, detail=exc.payload) from exc
     except PermissionError as exc:
@@ -444,18 +438,12 @@ async def create_session(payload: CreateSessionRequest) -> dict:
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict:
-    try:
-        return await manager.get_session_record(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.get_session_record(session_id)
 
 
 @app.get("/sessions/{session_id}/auth-state")
 async def get_session_auth_state(session_id: str) -> dict:
-    try:
-        return await manager.get_auth_state_info(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.get_auth_state_info(session_id)
 
 
 @app.get("/auth-profiles")
@@ -467,59 +455,40 @@ async def list_auth_profiles() -> list[dict]:
 async def get_auth_profile(profile_name: str) -> dict:
     try:
         return await manager.get_auth_profile(profile_name)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown auth profile: {profile_name}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/sessions/{session_id}/observe")
 async def observe(session_id: str, limit: int = 40, preset: str = "normal") -> dict:
-    try:
-        return await manager.observe(session_id, limit=limit, preset=preset)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.observe(session_id, limit=limit, preset=preset)
 
 
 @app.post("/sessions/{session_id}/observe")
 async def observe_post(session_id: str, payload: ObserveRequest) -> dict:
     """Observe with a perception preset. POST body allows richer options than query params."""
-    try:
-        return await manager.observe(session_id, limit=payload.limit, preset=payload.preset)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.observe(session_id, limit=payload.limit, preset=payload.preset)
 
 
 @app.post("/sessions/{session_id}/screenshot")
 async def capture_screenshot(session_id: str, payload: ScreenshotRequest) -> dict:
-    try:
-        return await manager.capture_screenshot(session_id, label=payload.label)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.capture_screenshot(session_id, label=payload.label)
 
 
 @app.get("/sessions/{session_id}/downloads")
 async def list_downloads(session_id: str) -> list[dict]:
-    try:
-        return await manager.list_downloads(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.list_downloads(session_id)
 
 
 @app.get("/sessions/{session_id}/tabs")
 async def list_tabs(session_id: str) -> list[dict]:
-    try:
-        return await manager.list_tabs(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.list_tabs(session_id)
 
 
 @app.post("/sessions/{session_id}/tabs/activate")
 async def activate_tab(session_id: str, payload: TabIndexRequest) -> dict:
     try:
         return await manager.activate_tab(session_id, payload.index)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -528,8 +497,6 @@ async def activate_tab(session_id: str, payload: TabIndexRequest) -> dict:
 async def close_tab(session_id: str, payload: TabIndexRequest) -> dict:
     try:
         return await manager.close_tab(session_id, payload.index)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -538,8 +505,6 @@ async def close_tab(session_id: str, payload: TabIndexRequest) -> dict:
 async def open_tab(session_id: str, payload: OpenTabRequest) -> dict:
     try:
         return await manager.open_tab(session_id, payload.url, payload.activate)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -548,8 +513,6 @@ async def open_tab(session_id: str, payload: OpenTabRequest) -> dict:
 async def navigate(session_id: str, payload: NavigateRequest) -> dict:
     try:
         return await manager.navigate(session_id, payload.url)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -566,8 +529,6 @@ async def click(session_id: str, payload: ClickRequest) -> dict:
             x=payload.x,
             y=payload.y,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -587,8 +548,6 @@ async def type_text(session_id: str, payload: TypeRequest) -> dict:
             clear_first=payload.clear_first,
             sensitive=payload.sensitive,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -601,8 +560,6 @@ async def type_text(session_id: str, payload: TypeRequest) -> dict:
 async def press_key(session_id: str, payload: PressRequest) -> dict:
     try:
         return await manager.press(session_id, payload.key)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -613,8 +570,6 @@ async def press_key(session_id: str, payload: PressRequest) -> dict:
 async def scroll(session_id: str, payload: ScrollRequest) -> dict:
     try:
         return await manager.scroll(session_id, payload.delta_x, payload.delta_y)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -627,8 +582,6 @@ async def execute_action(session_id: str, payload: ExecuteActionRequest) -> dict
             payload.action,
             approval_id=payload.approval_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -648,8 +601,6 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
             approved=payload.approved,
             approval_id=payload.approval_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -670,8 +621,6 @@ async def hover(session_id: str, payload: HoverRequest) -> dict:
             x=payload.x,
             y=payload.y,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -691,8 +640,6 @@ async def select_option(session_id: str, payload: SelectOptionRequest) -> dict:
             label=payload.label,
             index=payload.index,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -703,18 +650,13 @@ async def select_option(session_id: str, payload: SelectOptionRequest) -> dict:
 
 @app.post("/sessions/{session_id}/actions/wait")
 async def wait(session_id: str, payload: WaitRequest) -> dict:
-    try:
-        return await manager.wait(session_id, payload.wait_ms)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.wait(session_id, payload.wait_ms)
 
 
 @app.post("/sessions/{session_id}/actions/reload")
 async def reload(session_id: str) -> dict:
     try:
         return await manager.reload(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -725,8 +667,6 @@ async def reload(session_id: str) -> dict:
 async def go_back(session_id: str) -> dict:
     try:
         return await manager.go_back(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -737,8 +677,6 @@ async def go_back(session_id: str) -> dict:
 async def go_forward(session_id: str) -> dict:
     try:
         return await manager.go_forward(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -747,42 +685,28 @@ async def go_forward(session_id: str) -> dict:
 
 @app.post("/sessions/{session_id}/social/scroll")
 async def social_scroll_feed(session_id: str, payload: SocialScrollRequest) -> dict:
-    try:
-        return await manager.scroll_feed(session_id, direction=payload.direction, screens=payload.screens)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.scroll_feed(session_id, direction=payload.direction, screens=payload.screens)
 
 
 @app.get("/sessions/{session_id}/social/posts")
 async def social_extract_posts(session_id: str, limit: int = 20) -> list:
-    try:
-        return await manager.extract_posts(session_id, limit=limit)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.extract_posts(session_id, limit=limit)
 
 
 @app.get("/sessions/{session_id}/social/comments")
 async def social_extract_comments(session_id: str, limit: int = 20) -> list:
-    try:
-        return await manager.extract_comments(session_id, limit=limit)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.extract_comments(session_id, limit=limit)
 
 
 @app.get("/sessions/{session_id}/social/profile")
 async def social_extract_profile(session_id: str) -> dict:
-    try:
-        return await manager.extract_profile(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.extract_profile(session_id)
 
 
 @app.post("/sessions/{session_id}/social/post")
 async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
     try:
         return await manager.post_content(session_id, text=payload.text, approval_id=payload.approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -800,8 +724,6 @@ async def social_comment(session_id: str, payload: SocialCommentRequest) -> dict
             post_index=payload.post_index,
             approval_id=payload.approval_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -814,8 +736,6 @@ async def social_comment(session_id: str, payload: SocialCommentRequest) -> dict
 async def social_like(session_id: str, payload: SocialLikeRequest) -> dict:
     try:
         return await manager.like_post(session_id, post_index=payload.post_index, approval_id=payload.approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -828,8 +748,6 @@ async def social_like(session_id: str, payload: SocialLikeRequest) -> dict:
 async def social_follow(session_id: str, payload: SocialFollowRequest) -> dict:
     try:
         return await manager.follow_user(session_id, approval_id=payload.approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -842,8 +760,6 @@ async def social_follow(session_id: str, payload: SocialFollowRequest) -> dict:
 async def social_unfollow(session_id: str, payload: SocialUnfollowRequest) -> dict:
     try:
         return await manager.unfollow_user(session_id, approval_id=payload.approval_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -860,8 +776,6 @@ async def social_repost(session_id: str, payload: SocialRepostRequest) -> dict:
             post_index=payload.post_index,
             approval_id=payload.approval_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -879,8 +793,6 @@ async def social_dm(session_id: str, payload: SocialDmRequest) -> dict:
             text=payload.text,
             approval_id=payload.approval_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -901,8 +813,6 @@ async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
             approval_id=payload.approval_id,
             totp_secret=payload.totp_secret,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:
@@ -915,8 +825,6 @@ async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
 async def social_search(session_id: str, payload: SocialSearchRequest) -> dict:
     try:
         return await manager.search_page(session_id, query=payload.query)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -925,8 +833,6 @@ async def social_search(session_id: str, payload: SocialSearchRequest) -> dict:
 async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict:
     try:
         return await manager.save_storage_state(session_id, payload.path)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -935,8 +841,6 @@ async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) 
 async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) -> dict:
     try:
         return await manager.save_auth_profile(session_id, payload.profile_name)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -945,10 +849,7 @@ async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) ->
 
 @app.post("/sessions/{session_id}/takeover")
 async def request_human_takeover(session_id: str, payload: HumanTakeoverRequest) -> dict:
-    try:
-        return await manager.request_human_takeover(session_id, payload.reason)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.request_human_takeover(session_id, payload.reason)
 
 
 @app.post("/sessions/{session_id}/agent/step")
@@ -976,11 +877,8 @@ async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
 
 @app.post("/sessions/{session_id}/agent/jobs/step", status_code=202)
 async def enqueue_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
-    try:
-        await manager.get_session(session_id)
-        return await job_queue.enqueue_step(session_id, payload)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    await manager.get_session(session_id)
+    return await job_queue.enqueue_step(session_id, payload)
 
 
 @app.post("/sessions/{session_id}/agent/run")
@@ -1006,11 +904,8 @@ async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict:
 
 @app.post("/sessions/{session_id}/agent/jobs/run", status_code=202)
 async def enqueue_agent_run(session_id: str, payload: AgentRunRequest) -> dict:
-    try:
-        await manager.get_session(session_id)
-        return await job_queue.enqueue_run(session_id, payload)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    await manager.get_session(session_id)
+    return await job_queue.enqueue_run(session_id, payload)
 
 
 @app.get("/mcp")
@@ -1045,10 +940,7 @@ async def session_events(session_id: str, request: Request):
     Clients receive newline-delimited ``data: <json>\\n\\n`` messages.
     A keepalive comment is sent every ``settings.sse_keepalive_seconds`` seconds.
     """
-    try:
-        await manager.get_session(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    await manager.get_session(session_id)
 
     queue = _events.subscribe(session_id)
 
@@ -1087,8 +979,6 @@ async def screenshot_compare(session_id: str) -> dict:
     """
     try:
         return await manager.screenshot_diff(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1227,10 +1117,7 @@ async def import_auth_profile(payload: ImportAuthProfileRequest) -> dict:
 
 @app.delete("/sessions/{session_id}")
 async def close_session(session_id: str) -> dict:
-    try:
-        return await manager.close_session(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+    return await manager.close_session(session_id)
 
 
 # ── v0.5.0 endpoints ───────────────────────────────────────────────────────
@@ -1242,20 +1129,15 @@ async def get_network_log(
     method: str | None = None,
     url_contains: str | None = None,
 ) -> dict:
-    try:
-        return await manager.get_network_log(
-            session_id, limit=limit, method=method, url_contains=url_contains
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await manager.get_network_log(
+        session_id, limit=limit, method=method, url_contains=url_contains
+    )
 
 
 @app.post("/sessions/{session_id}/fork")
 async def fork_session(session_id: str, name: str | None = None, start_url: str | None = None) -> dict:
     try:
         return await manager.fork_session(session_id, name=name, start_url=start_url)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1268,11 +1150,8 @@ async def share_session(session_id: str, request: Request) -> dict:
     except Exception:
         pass
     ttl_minutes: int = int(body.get("ttl_minutes", 60))
-    try:
-        await manager.get_session(session_id)  # verify exists
-        return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await manager.get_session(session_id)  # raises KeyError → 404 if missing
+    return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
 
 
 @app.get("/share/{token}/observe")
@@ -1281,11 +1160,7 @@ async def shared_observe(token: str) -> dict:
     info = share_manager.token_info(token)
     if not info.get("valid"):
         raise HTTPException(status_code=403, detail=info.get("error", "Invalid token"))
-    session_id = info["session_id"]
-    try:
-        return await manager.observe(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await manager.observe(info["session_id"])
 
 
 @app.post("/sessions/{session_id}/shadow-browse")
@@ -1293,8 +1168,6 @@ async def enable_shadow_browse(session_id: str) -> dict:
     """Launch a headed browser session for debugging."""
     try:
         return await manager.enable_shadow_browse(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1322,37 +1195,31 @@ async def get_session_audit(
 async def export_script(session_id: str) -> dict:
     """Export session actions as a runnable Playwright Python script."""
     from .playwright_export import export_session_script
-    try:
-        session = await manager.get_session(session_id)
-        return await export_session_script(
-            session_id,
-            manager.audit,
-            start_url=session.page.url,
-            viewport_w=settings.default_viewport_width,
-            viewport_h=settings.default_viewport_height,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    session = await manager.get_session(session_id)
+    return await export_session_script(
+        session_id,
+        manager.audit,
+        start_url=session.page.url,
+        viewport_w=settings.default_viewport_width,
+        viewport_h=settings.default_viewport_height,
+    )
 
 
 @app.get("/sessions/{session_id}/trace")
 async def get_trace(session_id: str) -> dict:
     """Return trace file metadata and download URL."""
-    try:
-        from pathlib import Path as _Path
-        session = await manager.get_session(session_id)
-        trace_path = _Path(str(session.trace_path)) if hasattr(session, "trace_path") else None
-        if trace_path and trace_path.exists():
-            return {
-                "session_id": session_id,
-                "trace_path": str(trace_path),
-                "trace_url": f"/artifacts/{session_id}/{trace_path.name}",
-                "trace_size_bytes": trace_path.stat().st_size,
-                "viewer_url": f"https://trace.playwright.dev/?trace=/artifacts/{session_id}/{trace_path.name}",
-            }
-        return {"session_id": session_id, "trace_path": None, "trace_url": None, "viewer_url": None}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    from pathlib import Path as _Path
+    session = await manager.get_session(session_id)
+    trace_path = _Path(str(session.trace_path)) if hasattr(session, "trace_path") else None
+    if trace_path and trace_path.exists():
+        return {
+            "session_id": session_id,
+            "trace_path": str(trace_path),
+            "trace_url": f"/artifacts/{session_id}/{trace_path.name}",
+            "trace_size_bytes": trace_path.stat().st_size,
+            "viewer_url": f"https://trace.playwright.dev/?trace=/artifacts/{session_id}/{trace_path.name}",
+        }
+    return {"session_id": session_id, "trace_path": None, "trace_url": None, "viewer_url": None}
 
 
 @app.get("/pii-scrubber")
@@ -1422,10 +1289,7 @@ async def create_cron_job(payload: dict) -> dict:
 
 @app.get("/crons/{job_id}")
 async def get_cron_job(job_id: str) -> dict:
-    try:
-        return await cron_service.get_job(job_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await cron_service.get_job(job_id)
 
 
 @app.delete("/crons/{job_id}")

@@ -2,6 +2,65 @@
 
 All notable changes to auto-browser are documented here.
 
+## [0.5.1] — 2026-03-26
+
+### Fixed
+
+#### Shared `utc_now()` utility
+`_timestamp()` was duplicated identically in five modules (`audit.py`, `approvals.py`,
+`agent_jobs.py`, `browser_manager.py`, `session_tunnel.py`). Extracted to `utils.utc_now()`.
+Corrected the screenshot filename site to use the compact `strftime` format it always required
+(ISO-8601 is not suitable for filesystem paths).
+
+#### `tool_inputs.py` module split
+`tool_gateway.py` mixed ~280 lines of Pydantic input model class definitions with dispatch
+logic. All input models are now in a dedicated `tool_inputs.py` module. `tool_gateway.py`
+re-exports them for backwards compatibility.
+
+#### `agent_jobs.py` cleanup
+- Deleted dead `hasattr(store, 'update_status')` guard that was always `False`.
+- Merged duplicate `enqueue_step` / `enqueue_run` into shared `_enqueue()`.
+
+#### `orchestrator.py` exception handler merge
+Two 90%-identical `except ProviderAPIError` + `except Exception` branches merged into one
+with an `isinstance` check for error-code derivation.
+
+#### `mcp_transport.py` exception narrowing
+Overly-broad `except Exception` on JSON parse boundary narrowed to `except ValueError`.
+
+#### `approvals.py` hardening
+- SQLite WAL mode + `PRAGMA synchronous=NORMAL` for concurrent read performance.
+- Silent `except Exception: continue` in `FileApprovalStore._list_sync` now logs at DEBUG.
+
+#### `cron_service.py` atomic writes
+`_save()` replaced `write_text()` with tmp-file + rename to prevent corrupt-store-on-crash.
+
+#### `models.py` — `_WithApproval` mixin
+Nine social action request models and `UploadRequest` all repeated `approval_id: str | None = None`.
+Extracted to `_WithApproval` base class.
+
+#### `session_store.py` — `_MarkInterruptedMixin`
+`mark_all_active_interrupted` was implemented identically in both `FileSessionStore` and
+`RedisSessionStore`. Extracted to shared `_MarkInterruptedMixin`.
+
+#### `network_inspector.py` — pending dict memory leak
+When a page is detached (tab close, browser crash), in-flight requests that never received
+`requestfailed` / `requestfinished` events would accumulate in `_pending` indefinitely.
+`detach()` now schedules `_flush_pending()` which drains all pending entries as `failed` with
+`failure_text = "session detached"`.
+
+#### `browser_manager.py` — `create_session` decomposition
+190-line `create_session` method split into four focused private helpers:
+`_check_session_limit`, `_prepare_session_dirs`, `_build_context_kwargs`,
+`_cleanup_failed_session`.
+
+#### `main.py` — global `KeyError → 404` handler + route simplification
+A `@app.exception_handler(KeyError)` handler was added so all store-layer `KeyError` raises
+automatically return `404`. Removed redundant per-route `except KeyError` blocks across
+~30 route handlers, reducing main.py by ~120 lines.
+
+---
+
 ## [0.5.0] — 2026-03-25
 
 ### Added

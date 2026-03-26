@@ -25,7 +25,22 @@ class SessionStoreBackend(Protocol):
     async def mark_all_active_interrupted(self) -> None: ...
 
 
-class FileSessionStore:
+class _MarkInterruptedMixin:
+    """Shared mark_all_active_interrupted for stores that implement list() + upsert()."""
+
+    async def list(self) -> list[SessionRecord]: ...  # type: ignore[empty-body]
+    async def upsert(self, record: SessionRecord) -> None: ...  # type: ignore[empty-body]
+
+    async def mark_all_active_interrupted(self) -> None:
+        records = await self.list()
+        for record in records:
+            if record.status == "active":
+                record.status = "interrupted"
+                record.live = False
+                await self.upsert(record)
+
+
+class FileSessionStore(_MarkInterruptedMixin):
     def __init__(self, root: str | Path):
         self.root = Path(root)
 
@@ -43,14 +58,6 @@ class FileSessionStore:
 
     async def upsert(self, record: SessionRecord) -> None:
         await asyncio.to_thread(self._upsert_sync, record)
-
-    async def mark_all_active_interrupted(self) -> None:
-        records = await self.list()
-        for record in records:
-            if record.status == "active":
-                record.status = "interrupted"
-                record.live = False
-                await self.upsert(record)
 
     def _list_sync(self) -> list[SessionRecord]:
         records: list[SessionRecord] = []
@@ -75,7 +82,7 @@ class FileSessionStore:
         tmp_path.replace(path)
 
 
-class RedisSessionStore:
+class RedisSessionStore(_MarkInterruptedMixin):
     def __init__(self, url: str, prefix: str):
         if redis_from_url is None:
             raise RuntimeError("redis package is not available")
@@ -122,14 +129,6 @@ class RedisSessionStore:
             await pipe.set(self._record_key(record.id), record.model_dump_json())
             await pipe.sadd(self._index_key(), record.id)
             await pipe.execute()
-
-    async def mark_all_active_interrupted(self) -> None:
-        records = await self.list()
-        for record in records:
-            if record.status == "active":
-                record.status = "interrupted"
-                record.live = False
-                await self.upsert(record)
 
     def _require_client(self) -> Redis:
         if self.client is None:

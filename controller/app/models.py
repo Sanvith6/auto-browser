@@ -5,6 +5,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class _WithApproval(BaseModel):
+    """Mixin that adds an optional approval_id field to action request models."""
+
+    approval_id: str | None = None
+
+
 class CreateSessionRequest(BaseModel):
     name: str | None = None
     start_url: str | None = None
@@ -70,12 +76,11 @@ class NavigateRequest(BaseModel):
     url: str
 
 
-class UploadRequest(BaseModel):
+class UploadRequest(_WithApproval):
     selector: str | None = None
     element_id: str | None = None
     file_path: str
     approved: bool = False
-    approval_id: str | None = None
 
 
 class SaveStorageStateRequest(BaseModel):
@@ -430,47 +435,41 @@ class SocialScrapeRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
-class SocialPostRequest(BaseModel):
+class SocialPostRequest(_WithApproval):
     text: str = Field(min_length=1, max_length=5000)
-    approval_id: str | None = None
 
 
-class SocialCommentRequest(BaseModel):
+class SocialCommentRequest(_WithApproval):
     text: str = Field(min_length=1, max_length=5000)
     post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
 
 
-class SocialLikeRequest(BaseModel):
+class SocialLikeRequest(_WithApproval):
     post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
 
 
-class SocialFollowRequest(BaseModel):
-    approval_id: str | None = None
+class SocialFollowRequest(_WithApproval):
+    pass
 
 
-class SocialUnfollowRequest(BaseModel):
-    approval_id: str | None = None
+class SocialUnfollowRequest(_WithApproval):
+    pass
 
 
-class SocialRepostRequest(BaseModel):
+class SocialRepostRequest(_WithApproval):
     post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
 
 
-class SocialDmRequest(BaseModel):
+class SocialDmRequest(_WithApproval):
     recipient: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=5000)
-    approval_id: str | None = None
 
 
-class SocialLoginRequest(BaseModel):
+class SocialLoginRequest(_WithApproval):
     platform: Literal["x", "twitter", "instagram", "linkedin", "outlook", "microsoft", "live"]
     username: str = Field(min_length=1, max_length=500)
     password: str = Field(min_length=1, max_length=5000, repr=False)
     auth_profile: str | None = Field(default=None, max_length=120)
-    approval_id: str | None = None
     totp_secret: str | None = Field(default=None, max_length=500, repr=False)
 
 
