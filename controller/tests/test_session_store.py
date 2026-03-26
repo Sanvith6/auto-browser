@@ -166,7 +166,7 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved, session_file.resolve())
 
         payload = await self.manager.save_storage_state(session.id, "state.json")
-        self.assertIn(f"/session-scope/state.json", payload["saved_to"])
+        self.assertIn("/session-scope/state.json", payload["saved_to"])
 
     async def test_save_auth_profile_persists_reusable_profile(self) -> None:
         artifact_dir = Path(self.settings.artifact_root) / "session-profile"
