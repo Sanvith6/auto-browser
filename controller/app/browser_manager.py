@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import re
+import shutil
 import tarfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -3990,26 +3991,35 @@ class BrowserManager:
     # ── Screenshot diff ──────────────────────────────────────────────────────
 
     async def screenshot_diff(self, session_id: str) -> dict[str, Any]:
-        """Capture a new screenshot and compare pixel-by-pixel with the previous one."""
+        """Capture a new screenshot and compare pixel-by-pixel with the previous one.
+
+        On the first call (no prior screenshot exists), saves a baseline and returns
+        {"baseline_captured": True} — navigate to a new state and call again to compare.
+        """
         session = await self.get_session(session_id)
         async with session.lock:
-            # Capture current state
-            new_shot = await self._capture_screenshot(session, "diff-b")
-
-            # Find the most recent prior screenshot (not the one we just took)
+            # Find any prior non-diff-b screenshot first
             artifact_dir = session.artifact_dir
-            shots = sorted(
+            prior_shots = sorted(
                 [p for p in artifact_dir.glob("*.png") if "diff-b" not in p.name],
                 key=lambda p: p.stat().st_mtime,
             )
-            if not shots:
+
+            # Capture current state
+            new_shot = await self._capture_screenshot(session, "diff-b")
+
+            if not prior_shots:
+                # No baseline — the screenshot we just took becomes the reference.
+                # Rename it so next call picks it up as the prior.
+                baseline_path = artifact_dir / "screenshot-baseline.png"
+                shutil.copy2(new_shot["path"], str(baseline_path))
                 return {
-                    "error": "no previous screenshot to compare against",
-                    "b_url": new_shot["url"],
-                    "b_path": new_shot["path"],
+                    "baseline_captured": True,
+                    "baseline_url": f"/artifacts/{session_id}/screenshot-baseline.png",
+                    "message": "Baseline saved. Navigate to a new state and call compare again to see the diff.",
                 }
 
-            prev_path = shots[-1]
+            prev_path = prior_shots[-1]
             prev_url = f"/artifacts/{session_id}/{prev_path.name}"
             return await asyncio.to_thread(
                 self._compute_diff,

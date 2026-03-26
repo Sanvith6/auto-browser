@@ -1254,10 +1254,18 @@ async def fork_session(session_id: str, name: str | None = None, start_url: str 
         return await manager.fork_session(session_id, name=name, start_url=start_url)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/share")
-async def share_session(session_id: str, ttl_minutes: int = 60) -> dict:
+async def share_session(session_id: str, request: Request) -> dict:
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    ttl_minutes: int = int(body.get("ttl_minutes", 60))
     try:
         await manager.get_session(session_id)  # verify exists
         return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
@@ -1332,6 +1340,44 @@ async def get_pii_scrubber() -> dict:
     return manager.get_pii_scrubber_status()
 
 
+# ── Proxy persona endpoints ─────────────────────────────────────────────────
+
+@app.get("/proxy-personas")
+async def list_proxy_personas() -> list:
+    return proxy_store.list_personas()
+
+
+@app.post("/proxy-personas")
+async def set_proxy_persona(payload: dict) -> dict:
+    try:
+        name = payload.get("name", "")
+        return proxy_store.set_persona(
+            name,
+            server=payload.get("server", ""),
+            username=payload.get("username"),
+            password=payload.get("password"),
+            description=payload.get("description", ""),
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/proxy-personas/{name}")
+async def get_proxy_persona(name: str) -> dict:
+    try:
+        return proxy_store.get_persona(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/proxy-personas/{name}")
+async def delete_proxy_persona(name: str) -> dict:
+    deleted = proxy_store.delete_persona(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Proxy persona not found: {name!r}")
+    return {"deleted": True, "name": name}
+
+
 # ── Cron endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/crons")
@@ -1339,10 +1385,16 @@ async def list_cron_jobs() -> list:
     return await cron_service.list_jobs()
 
 
+_CRON_JOB_FIELDS = frozenset(
+    {"name", "goal", "schedule", "start_url", "auth_profile", "proxy_persona", "max_steps", "enabled", "webhook_enabled"}
+)
+
+
 @app.post("/crons")
 async def create_cron_job(payload: dict) -> dict:
     try:
-        return await cron_service.create_job(**payload)
+        filtered = {k: v for k, v in payload.items() if k in _CRON_JOB_FIELDS}
+        return await cron_service.create_job(**filtered)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

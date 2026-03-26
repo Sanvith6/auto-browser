@@ -225,7 +225,8 @@ async def export_session_script(
           "action_count": int,
         }
     """
-    events = await audit_store.list_events(session_id=session_id) if hasattr(audit_store, "list_events") else []
+    events_raw = await audit_store.list(session_id=session_id, limit=5000) if hasattr(audit_store, "list") else []
+    events = [e.model_dump() if hasattr(e, "model_dump") else e for e in events_raw]
     script = build_script(
         session_id=session_id,
         audit_events=events,
