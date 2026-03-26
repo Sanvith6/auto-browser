@@ -271,20 +271,6 @@ class BrowserActionDecision(BaseModel):
                 raise ValueError("upload requires element_id or selector")
             if not self.file_path:
                 raise ValueError("upload requires file_path")
-        if self.action in {
-            "done",
-            "request_human_takeover",
-            "wait",
-            "reload",
-            "go_back",
-            "go_forward",
-            "social_like",
-            "social_follow",
-            "social_unfollow",
-            "social_repost",
-            "social_login",
-        }:
-            return self
         return self
 
 

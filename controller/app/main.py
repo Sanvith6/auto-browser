@@ -70,6 +70,8 @@ from .tool_gateway import McpToolGateway
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_VERSION = "0.5.0"
+
 settings = get_settings()
 manager = BrowserManager(settings)
 providers = ProviderRegistry(settings)
@@ -116,7 +118,7 @@ mcp_transport = McpHttpTransport(
     tool_gateway=tool_gateway,
     server_name="auto-browser",
     server_title="Auto Browser MCP",
-    server_version="0.5.0",
+    server_version=_VERSION,
     allowed_origins=settings.mcp_allowed_origin_list,
     session_store_path=settings.mcp_session_store_path,
     manager=manager,
@@ -145,7 +147,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Auto Browser Controller",
-    version="0.5.0",
+    version=_VERSION,
     lifespan=lifespan,
     summary="Visual Auto Browser control plane for LLM workflows.",
 )
@@ -1295,6 +1297,25 @@ async def enable_shadow_browse(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/sessions/{session_id}/audit")
+async def get_session_audit(
+    session_id: str,
+    limit: int = 200,
+    event_type: str | None = None,
+) -> dict:
+    """Return audit events for a session as JSON, newest first."""
+    events = await manager.audit.list(
+        session_id=session_id,
+        limit=min(limit, 5000),
+        event_type=event_type or None,
+    )
+    return {
+        "session_id": session_id,
+        "count": len(events),
+        "events": [e.model_dump() for e in events],
+    }
 
 
 @app.get("/sessions/{session_id}/export-script")

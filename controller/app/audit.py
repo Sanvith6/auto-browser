@@ -93,17 +93,19 @@ class FileAuditStore:
         if not self.events_path.exists():
             return []
         events: list[AuditEvent] = []
-        for raw in self.events_path.read_text(encoding="utf-8").splitlines():
-            if not raw.strip():
-                continue
-            event = AuditEvent.model_validate_json(raw)
-            if session_id and event.session_id != session_id:
-                continue
-            if event_type and event.event_type != event_type:
-                continue
-            if operator_id and event.operator.id != operator_id:
-                continue
-            events.append(event)
+        with self.events_path.open(encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                event = AuditEvent.model_validate_json(raw)
+                if session_id and event.session_id != session_id:
+                    continue
+                if event_type and event.event_type != event_type:
+                    continue
+                if operator_id and event.operator.id != operator_id:
+                    continue
+                events.append(event)
         events.sort(key=lambda item: (item.timestamp, item.id), reverse=True)
         return events[:limit]
 
@@ -239,8 +241,10 @@ class SQLiteAuditStore:
         return [AuditEvent.model_validate_json(row[0]) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
 

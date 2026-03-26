@@ -138,6 +138,11 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
             return f'tab = context.new_page()\ntab.goto({url!r})\npage = tab\n'
         return "page = context.new_page()\n"
 
+    if action == "upload":
+        selector = details.get("selector", "")
+        file_path = details.get("file_path", "<path/to/file>")
+        return f'page.locator({selector!r}).first.set_input_files({file_path!r})  # verify file path before running\n'
+
     return None  # unsupported — skip
 
 
@@ -180,6 +185,7 @@ def build_script(
         body_lines.append(f"page.goto({start_url!r})\n")
         body_lines.append("page.wait_for_load_state('domcontentloaded')\n")
 
+    first_navigate_skipped = False
     for event in audit_events:
         event_type = event.get("event_type", "")
         action = event.get("action", "")
@@ -191,6 +197,13 @@ def build_script(
             continue
         if status not in {"ok", "success", "completed"}:
             continue
+
+        # Skip the first navigate action if it matches start_url to avoid duplicating goto
+        if action == "navigate" and not first_navigate_skipped and start_url:
+            if details.get("url", "").rstrip("/") == start_url.rstrip("/"):
+                first_navigate_skipped = True
+                continue
+        first_navigate_skipped = True
 
         code = _action_to_code(action, details)
         if code:
