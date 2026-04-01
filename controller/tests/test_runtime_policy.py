@@ -91,6 +91,22 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertTrue(any("TAKEOVER_URL" in warning for warning in report.warnings))
         self.assertTrue(any("METRICS_ENABLED" in warning for warning in report.warnings))
 
+    def test_confidential_default_emits_hardening_warnings(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN="secret",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="false",
+            SESSION_ISOLATION_MODE="shared_browser_node",
+            WITNESS_PROTECTION_MODE_DEFAULT="confidential",
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertTrue(any("WITNESS_PROTECTION_MODE_DEFAULT=confidential" in warning for warning in report.warnings))
+
     def test_production_rejects_invalid_provider_auth_modes(self) -> None:
         settings = Settings(
             _env_file=None,

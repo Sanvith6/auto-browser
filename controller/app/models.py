@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+ProtectionMode = Literal["normal", "confidential"]
+
 
 class _WithApproval(BaseModel):
     """Mixin that adds an optional approval_id field to action request models."""
@@ -20,6 +22,7 @@ class CreateSessionRequest(BaseModel):
     proxy_username: str | None = None
     proxy_password: str | None = None
     user_agent: str | None = None
+    protection_mode: ProtectionMode | None = None
     totp_secret: str | None = Field(default=None, repr=False)
 
     @model_validator(mode="after")
@@ -370,6 +373,7 @@ class SessionRecord(BaseModel):
     downloads: list[dict[str, Any]] = Field(default_factory=list)
     last_action: str | None = None
     trace_path: str | None = None
+    protection_mode: ProtectionMode = "normal"
 
 
 class OperatorIdentity(BaseModel):

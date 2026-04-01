@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - graceful fallback for non-login test run
 from . import events as _events
 from .action_errors import BrowserActionError
 from .approvals import ApprovalRequiredError, ApprovalStore
-from .audit import AuditStore
+from .audit import AuditStore, get_current_operator
 from .auth_state import AuthStateManager
 from .browser_scripts import (
     ACTIVE_ELEMENT_SCRIPT,
@@ -56,6 +56,15 @@ from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .social_errors import SocialActionError
 from .utils import UTC, utc_now
 from .webhooks import dispatch_approval_event
+from .witness import (
+    WitnessActionContext,
+    WitnessApproval,
+    WitnessEvidence,
+    WitnessPolicyEngine,
+    WitnessPolicyOutcome,
+    WitnessRecorder,
+    WitnessSessionContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +107,8 @@ class BrowserSession:
     network_inspector: NetworkInspector | None = None
     # Headless/headed state — set to False to request headed mode on next fork
     headless: bool = True
+    protection_mode: str = "normal"
+    pending_witness_context: dict[str, Any] | None = None
 
 
 class BrowserManager:
@@ -113,6 +124,13 @@ class BrowserManager:
         Path(self.settings.auth_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.approval_root).mkdir(parents=True, exist_ok=True)
         Path(self.settings.audit_root).mkdir(parents=True, exist_ok=True)
+        witness_root = Path(self.settings.witness_root)
+        try:
+            witness_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            witness_root = Path(self.settings.audit_root).resolve().parent / "witness"
+            witness_root.mkdir(parents=True, exist_ok=True)
+            self.settings.witness_root = str(witness_root)
         if self.settings.state_db_path:
             Path(self.settings.state_db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         Path(self.settings.session_store_root).mkdir(parents=True, exist_ok=True)
@@ -142,6 +160,8 @@ class BrowserManager:
             text_limit=self.settings.ocr_text_limit,
         )
         self.pii_scrubber = PiiScrubber.from_settings(self.settings)
+        self.witness = WitnessRecorder(self.settings.witness_root)
+        self.witness_policy = WitnessPolicyEngine()
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
 
@@ -333,6 +353,7 @@ class BrowserManager:
         logger.info("starting browser manager")
         await self.approvals.startup()
         await self.audit.startup()
+        await self.witness.startup()
         await self.session_store.startup()
         await self.session_store.mark_all_active_interrupted()
         self.playwright = await async_playwright().start()
@@ -480,6 +501,7 @@ class BrowserManager:
         request_proxy_username: str | None = None,
         request_proxy_password: str | None = None,
         user_agent: str | None = None,
+        protection_mode: str | None = None,
         totp_secret: str | None = None,
     ) -> dict[str, Any]:
         if storage_state_path and auth_profile:
@@ -546,6 +568,7 @@ class BrowserManager:
                     self.settings.default_viewport_width / 2,
                     self.settings.default_viewport_height / 2,
                 ),
+                protection_mode=protection_mode or self.settings.witness_protection_mode_default,
                 totp_secret=totp_secret,
             )
             if source_path is not None:
@@ -574,6 +597,17 @@ class BrowserManager:
             await self._maybe_provision_session_tunnel(session)
             await self._persist_session(session, status="active")
             summary = await self._session_summary(session)
+            await self._record_session_witness_receipt(
+                session,
+                action="create_session",
+                status="ok",
+                metadata={
+                    "start_url": start_url,
+                    "storage_state_path": storage_state_path,
+                    "auth_profile": auth_profile,
+                    "totp_enabled": bool(totp_secret),
+                },
+            )
             await self.audit.append(
                 event_type="session_created",
                 status="ok",
@@ -710,6 +744,7 @@ class BrowserManager:
 
     async def approve(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
         approval = await self.approvals.approve(approval_id, comment=comment)
+        session = self.sessions.get(approval.session_id)
         await self.audit.append(
             event_type="approval_decision",
             status="approved",
@@ -718,10 +753,27 @@ class BrowserManager:
             approval_id=approval.id,
             details={"kind": approval.kind, "comment": comment},
         )
+        if session is not None:
+            await self._record_witness_receipt(
+                session,
+                event_type="approval",
+                status="approved",
+                action="approve",
+                action_class="control",
+                approval=WitnessApproval(
+                    required=True,
+                    approval_id=approval.id,
+                    status=approval.status,
+                    reason=approval.reason,
+                ),
+                target={"kind": approval.kind, "action": approval.action.action},
+                metadata={"comment": comment},
+            )
         return approval.model_dump()
 
     async def reject(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
         approval = await self.approvals.reject(approval_id, comment=comment)
+        session = self.sessions.get(approval.session_id)
         await self.audit.append(
             event_type="approval_decision",
             status="rejected",
@@ -730,6 +782,22 @@ class BrowserManager:
             approval_id=approval.id,
             details={"kind": approval.kind, "comment": comment},
         )
+        if session is not None:
+            await self._record_witness_receipt(
+                session,
+                event_type="approval",
+                status="rejected",
+                action="reject",
+                action_class="control",
+                approval=WitnessApproval(
+                    required=True,
+                    approval_id=approval.id,
+                    status=approval.status,
+                    reason=approval.reason,
+                ),
+                target={"kind": approval.kind, "action": approval.action.action},
+                metadata={"comment": comment},
+            )
         return approval.model_dump()
 
     async def execute_approval(self, approval_id: str) -> dict[str, Any]:
@@ -767,6 +835,22 @@ class BrowserManager:
             approval_id=approval.id,
             details={"kind": approval.kind, "action": decision.action},
         )
+        session = self.sessions.get(approval.session_id)
+        if session is not None:
+            await self._record_witness_receipt(
+                session,
+                event_type="approval",
+                status="executed",
+                action="execute_approval",
+                action_class="control",
+                approval=WitnessApproval(
+                    required=True,
+                    approval_id=approval.id,
+                    status=latest.status,
+                    reason=approval.reason,
+                ),
+                target={"kind": approval.kind, "action": decision.action},
+            )
         return {
             "approval": latest.model_dump(),
             "execution": execution,
@@ -2720,6 +2804,7 @@ class BrowserManager:
         *,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
+        session = await self.get_session(session_id)
         if decision.action == "social_post":
             return await self.post_content(session_id, decision.text or "", approval_id=approval_id)
         if decision.action == "social_comment":
@@ -2752,71 +2837,80 @@ class BrowserManager:
             decision,
             approval_id=approval_id,
         )
+        session.pending_witness_context = {
+            "risk_category": decision.risk_category,
+            "approval_id": approval_id or (approval.id if approval is not None else None),
+            "approval_status": "approved" if approval_id or approval is not None else None,
+            "runtime_requires_approval": approval is not None or approval_id is not None,
+            "sensitive_input": bool(getattr(decision, "sensitive", False)),
+        }
+        try:
+            if decision.action == "navigate":
+                result = await self.navigate(session_id, decision.url or "")
+            elif decision.action == "click":
+                result = await self.click(
+                    session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    x=decision.x,
+                    y=decision.y,
+                )
+            elif decision.action == "hover":
+                result = await self.hover(
+                    session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    x=decision.x,
+                    y=decision.y,
+                )
+            elif decision.action == "select_option":
+                result = await self.select_option(
+                    session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    value=decision.value,
+                    label=decision.label,
+                    index=decision.index,
+                )
+            elif decision.action == "type":
+                result = await self.type(
+                    session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    text=decision.text or "",
+                    clear_first=decision.clear_first,
+                    sensitive=decision.sensitive,
+                )
+            elif decision.action == "press":
+                result = await self.press(session_id, decision.key or "")
+            elif decision.action == "scroll":
+                result = await self.scroll(session_id, decision.delta_x, decision.delta_y)
+            elif decision.action == "wait":
+                result = await self.wait(session_id, decision.wait_ms)
+            elif decision.action == "reload":
+                result = await self.reload(session_id)
+            elif decision.action == "go_back":
+                result = await self.go_back(session_id)
+            elif decision.action == "go_forward":
+                result = await self.go_forward(session_id)
+            elif decision.action == "upload":
+                result = await self.upload(
+                    session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    file_path=decision.file_path or "",
+                    approved=False,
+                    approval_id=approval_id,
+                )
+                return result
+            else:  # pragma: no cover - guarded by schema
+                raise ValueError(f"Unsupported action: {decision.action}")
 
-        if decision.action == "navigate":
-            result = await self.navigate(session_id, decision.url or "")
-        elif decision.action == "click":
-            result = await self.click(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                x=decision.x,
-                y=decision.y,
-            )
-        elif decision.action == "hover":
-            result = await self.hover(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                x=decision.x,
-                y=decision.y,
-            )
-        elif decision.action == "select_option":
-            result = await self.select_option(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                value=decision.value,
-                label=decision.label,
-                index=decision.index,
-            )
-        elif decision.action == "type":
-            result = await self.type(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                text=decision.text or "",
-                clear_first=decision.clear_first,
-                sensitive=decision.sensitive,
-            )
-        elif decision.action == "press":
-            result = await self.press(session_id, decision.key or "")
-        elif decision.action == "scroll":
-            result = await self.scroll(session_id, decision.delta_x, decision.delta_y)
-        elif decision.action == "wait":
-            result = await self.wait(session_id, decision.wait_ms)
-        elif decision.action == "reload":
-            result = await self.reload(session_id)
-        elif decision.action == "go_back":
-            result = await self.go_back(session_id)
-        elif decision.action == "go_forward":
-            result = await self.go_forward(session_id)
-        elif decision.action == "upload":
-            result = await self.upload(
-                session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                file_path=decision.file_path or "",
-                approved=False,
-                approval_id=approval_id,
-            )
+            if approval is not None:
+                await self.approvals.mark_executed(approval.id)
             return result
-        else:  # pragma: no cover - guarded by schema
-            raise ValueError(f"Unsupported action: {decision.action}")
-
-        if approval is not None:
-            await self.approvals.mark_executed(approval.id)
-        return result
+        finally:
+            session.pending_witness_context = None
 
     async def upload(
 
@@ -2866,6 +2960,26 @@ class BrowserManager:
         session = await self.get_session(session_id)
         safe_path = self._safe_session_auth_path(session, path)
         async with session.lock:
+            witness_outcome = self.witness_policy.evaluate_action(
+                session=self._witness_session_context(session),
+                action=WitnessActionContext(
+                    action="save_storage_state",
+                    action_class="auth",
+                    stores_auth_material=True,
+                ),
+            )
+            if witness_outcome.should_block:
+                await self._record_witness_receipt(
+                    session,
+                    event_type="auth_state",
+                    status="blocked",
+                    action="save_storage_state",
+                    action_class="auth",
+                    outcome=witness_outcome,
+                    target={"path": path},
+                    metadata={"error": witness_outcome.block_reason},
+                )
+                raise PermissionError(witness_outcome.block_reason or "Witness policy blocked save_storage_state")
             auth_info = await self.auth_state.write_storage_state(session.context, safe_path)
             session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
             payload = {
@@ -2883,6 +2997,16 @@ class BrowserManager:
                 action="save_storage_state",
                 session_id=session.id,
                 details={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"]},
+            )
+            await self._record_witness_receipt(
+                session,
+                event_type="auth_state",
+                status="ok",
+                action="save_storage_state",
+                action_class="auth",
+                outcome=witness_outcome,
+                target={"path": path},
+                metadata={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"]},
             )
             await self._persist_session(session, status="active")
             return payload
@@ -2923,6 +3047,26 @@ class BrowserManager:
     async def save_auth_profile(self, session_id: str, profile_name: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
         async with session.lock:
+            witness_outcome = self.witness_policy.evaluate_action(
+                session=self._witness_session_context(session),
+                action=WitnessActionContext(
+                    action="save_auth_profile",
+                    action_class="auth",
+                    stores_auth_material=True,
+                ),
+            )
+            if witness_outcome.should_block:
+                await self._record_witness_receipt(
+                    session,
+                    event_type="auth_profile",
+                    status="blocked",
+                    action="save_auth_profile",
+                    action_class="auth",
+                    outcome=witness_outcome,
+                    target={"profile_name": profile_name},
+                    metadata={"error": witness_outcome.block_reason},
+                )
+                raise PermissionError(witness_outcome.block_reason or "Witness policy blocked save_auth_profile")
             payload = await self._save_auth_profile_for_session(session, profile_name)
             payload["session"] = await self._session_summary(session)
             await self._append_jsonl(
@@ -2935,6 +3079,16 @@ class BrowserManager:
                 action="save_auth_profile",
                 session_id=session.id,
                 details={"profile_name": payload["profile_name"], "saved_to": payload["saved_to"]},
+            )
+            await self._record_witness_receipt(
+                session,
+                event_type="auth_profile",
+                status="ok",
+                action="save_auth_profile",
+                action_class="auth",
+                outcome=witness_outcome,
+                target={"profile_name": payload["profile_name"]},
+                metadata={"saved_to": payload["saved_to"]},
             )
             await self._persist_session(session, status="active")
             return payload
@@ -2994,6 +3148,14 @@ class BrowserManager:
             session_id=session.id,
             details={"reason": reason},
         )
+        await self._record_witness_receipt(
+            session,
+            event_type="control",
+            status="ok",
+            action="request_human_takeover",
+            action_class="control",
+            target={"reason": reason},
+        )
         await self._persist_session(session, status="active")
         return payload
 
@@ -3023,6 +3185,27 @@ class BrowserManager:
             reason=fallback_reason or decision.reason,
             action=decision,
             observation=await self._approval_observation(session),
+        )
+        await self._record_witness_receipt(
+            session,
+            event_type="approval",
+            status="pending",
+            action="approval_requested",
+            action_class="control",
+            risk_category=decision.risk_category,
+            approval=WitnessApproval(
+                required=True,
+                approval_id=approval.id,
+                status=approval.status,
+                reason=approval.reason,
+            ),
+            target={
+                "kind": approval.kind,
+                "action": decision.action,
+                "selector": decision.selector,
+                "element_id": decision.element_id,
+            },
+            metadata={"reason": approval.reason},
         )
         # Emit SSE event
         _events.emit_approval(session_id, approval.id, approval.kind, approval.status, approval.reason)
@@ -3071,6 +3254,18 @@ class BrowserManager:
                     "browser_node": session.browser_node_name,
                 },
             )
+            await self._record_witness_receipt(
+                session,
+                event_type="session",
+                status="ok",
+                action="close_session",
+                action_class="control",
+                metadata={
+                    "trace_path": str(session.trace_path),
+                    "isolation_mode": session.isolation_mode,
+                    "browser_node": session.browser_node_name,
+                },
+            )
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
 
     async def _maybe_provision_session_tunnel(self, session: BrowserSession) -> None:
@@ -3100,8 +3295,19 @@ class BrowserManager:
         operation,
     ) -> dict[str, Any]:
         async with session.lock:
+            witness_context = self._consume_witness_context(session)
+            witness_outcome = self.witness_policy.evaluate_action(
+                session=self._witness_session_context(session),
+                action=self._build_witness_action_context(
+                    action_name=action_name,
+                    target=target,
+                    witness_context=witness_context,
+                ),
+            )
             before = await self._light_snapshot(session, label=f"before-{action_name}")
             try:
+                if witness_outcome.should_block:
+                    raise PermissionError(witness_outcome.block_reason or "Witness policy blocked this action")
                 await operation()
                 totp_result = await self._maybe_handle_totp(session)
                 if totp_result is not None:
@@ -3157,6 +3363,31 @@ class BrowserManager:
                     session_id=session.id,
                     details={"target": target, "error": str(exc)},
                 )
+                await self._record_witness_receipt(
+                    session,
+                    event_type="browser_action",
+                    status="blocked",
+                    action=action_name,
+                    action_class=self._witness_action_class(
+                        action_name,
+                        risk_category=witness_context.get("risk_category"),
+                    ),
+                    risk_category=witness_context.get("risk_category"),
+                    target=target,
+                    outcome=witness_outcome,
+                    before=before,
+                    after=failed,
+                    approval=WitnessApproval(
+                        required=bool(
+                            witness_outcome.require_approval
+                            or witness_context.get("approval_id")
+                            or target.get("approval_id")
+                        ),
+                        approval_id=witness_context.get("approval_id") or target.get("approval_id"),
+                        status="blocked",
+                    ),
+                    metadata={"error": str(exc)},
+                )
                 raise BrowserActionError(
                     str(exc),
                     code="browser_action_blocked",
@@ -3187,6 +3418,31 @@ class BrowserManager:
                     session_id=session.id,
                     details={"target": target, "error": exc.payload},
                 )
+                await self._record_witness_receipt(
+                    session,
+                    event_type="browser_action",
+                    status="failed",
+                    action=action_name,
+                    action_class=self._witness_action_class(
+                        action_name,
+                        risk_category=witness_context.get("risk_category"),
+                    ),
+                    risk_category=witness_context.get("risk_category"),
+                    target=target,
+                    outcome=witness_outcome,
+                    before=before,
+                    after=failed,
+                    approval=WitnessApproval(
+                        required=bool(
+                            witness_outcome.require_approval
+                            or witness_context.get("approval_id")
+                            or target.get("approval_id")
+                        ),
+                        approval_id=witness_context.get("approval_id") or target.get("approval_id"),
+                        status="failed",
+                    ),
+                    metadata={"error": exc.payload},
+                )
                 exc.details.setdefault("snapshot", failed)
                 raise
             except PlaywrightError as exc:
@@ -3209,6 +3465,31 @@ class BrowserManager:
                     action=action_name,
                     session_id=session.id,
                     details={"target": target, "error": str(exc)},
+                )
+                await self._record_witness_receipt(
+                    session,
+                    event_type="browser_action",
+                    status="failed",
+                    action=action_name,
+                    action_class=self._witness_action_class(
+                        action_name,
+                        risk_category=witness_context.get("risk_category"),
+                    ),
+                    risk_category=witness_context.get("risk_category"),
+                    target=target,
+                    outcome=witness_outcome,
+                    before=before,
+                    after=failed,
+                    approval=WitnessApproval(
+                        required=bool(
+                            witness_outcome.require_approval
+                            or witness_context.get("approval_id")
+                            or target.get("approval_id")
+                        ),
+                        approval_id=witness_context.get("approval_id") or target.get("approval_id"),
+                        status="failed",
+                    ),
+                    metadata={"error": str(exc)},
                 )
                 raise BrowserActionError(
                     f"Action failed for {action_name}. Refresh observation and retry.",
@@ -3238,6 +3519,31 @@ class BrowserManager:
                 action=action_name,
                 session_id=session.id,
                 details={"target": target, "verification": verification},
+            )
+            await self._record_witness_receipt(
+                session,
+                event_type="browser_action",
+                status="ok",
+                action=action_name,
+                action_class=self._witness_action_class(
+                    action_name,
+                    risk_category=witness_context.get("risk_category"),
+                ),
+                risk_category=witness_context.get("risk_category"),
+                target=target,
+                outcome=witness_outcome,
+                before=before,
+                after=after,
+                verification=verification,
+                approval=WitnessApproval(
+                    required=bool(
+                        witness_outcome.require_approval
+                        or witness_context.get("approval_id")
+                        or target.get("approval_id")
+                    ),
+                    approval_id=witness_context.get("approval_id") or target.get("approval_id"),
+                    status="executed" if (witness_context.get("approval_id") or target.get("approval_id")) else None,
+                ),
             )
             await self._persist_session(session, status="active")
             _events.emit_action(session.id, action_name, "ok", {"url": session.page.url})
@@ -3545,6 +3851,151 @@ class BrowserManager:
         )
         return [item.model_dump() for item in events]
 
+    async def list_witness_receipts(self, session_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        receipts = await self.witness.list(session_id, limit=limit)
+        return [item.model_dump() for item in receipts]
+
+    def _auth_material_encryption_ready(self) -> bool:
+        return bool(self.auth_state.require_encryption or self.auth_state.encryption_enabled)
+
+    def _witness_session_context(self, session: BrowserSession) -> WitnessSessionContext:
+        return WitnessSessionContext(
+            session_id=session.id,
+            profile=session.protection_mode,  # type: ignore[arg-type]
+            isolation_mode=session.isolation_mode,
+            shared_takeover_surface=session.shared_takeover_surface,
+            shared_browser_process=session.shared_browser_process,
+            auth_state_encrypted=self._auth_material_encryption_ready(),
+            operator=get_current_operator(),
+        )
+
+    async def _record_witness_receipt(
+        self,
+        session: BrowserSession,
+        *,
+        event_type: str,
+        status: str,
+        action: str,
+        action_class: str,
+        risk_category: str | None = None,
+        target: dict[str, Any] | None = None,
+        outcome: WitnessPolicyOutcome | None = None,
+        before: dict[str, Any] | None = None,
+        after: dict[str, Any] | None = None,
+        verification: dict[str, Any] | None = None,
+        approval: WitnessApproval | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.settings.witness_enabled:
+            return
+        policy = outcome or WitnessPolicyOutcome(profile=session.protection_mode)  # type: ignore[arg-type]
+        await self.witness.record(
+            session.id,
+            profile=session.protection_mode,  # type: ignore[arg-type]
+            event_type=event_type,
+            status=status,
+            action=action,
+            action_class=action_class,  # type: ignore[arg-type]
+            session_id=session.id,
+            risk_category=risk_category,
+            operator=get_current_operator(),
+            approval=approval or WitnessApproval(),
+            target=self.witness_policy.redact_target(target or {}, evidence_mode=policy.evidence_mode),
+            concerns=policy.concerns,
+            evidence_mode=policy.evidence_mode,
+            evidence=WitnessEvidence(
+                before=before if policy.evidence_mode == "standard" else None,
+                after=after if policy.evidence_mode == "standard" else None,
+                verification=verification,
+                artifacts={},
+            ),
+            metadata=metadata or {},
+        )
+
+    async def _record_session_witness_receipt(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.settings.witness_enabled:
+            return
+        outcome = self.witness_policy.evaluate_session(self._witness_session_context(session))
+        await self._record_witness_receipt(
+            session,
+            event_type="session",
+            status=status,
+            action=action,
+            action_class="control",
+            outcome=outcome,
+            metadata=metadata,
+        )
+
+    def _witness_action_class(self, action_name: str, *, risk_category: str | None = None) -> str:
+        if risk_category in {"payment", "account_change", "destructive"}:
+            return risk_category
+        if action_name == "upload":
+            return "upload"
+        if action_name in {"save_auth_profile", "save_storage_state"}:
+            return "auth"
+        if action_name in {
+            "social_post",
+            "social_comment",
+            "social_like",
+            "social_follow",
+            "social_unfollow",
+            "social_repost",
+            "social_dm",
+            "like_post",
+            "follow_user",
+            "unfollow_user",
+            "repost_post",
+        }:
+            return "post"
+        if action_name in {"request_human_takeover", "close_session", "create_session"}:
+            return "control"
+        if action_name in {"navigate", "hover", "scroll", "scroll_feed", "wait", "reload", "go_back", "go_forward", "search_page"}:
+            return "read"
+        return "write"
+
+    def _consume_witness_context(self, session: BrowserSession) -> dict[str, Any]:
+        payload = dict(session.pending_witness_context or {})
+        session.pending_witness_context = None
+        return payload
+
+    def _build_witness_action_context(
+        self,
+        *,
+        action_name: str,
+        target: dict[str, Any],
+        witness_context: dict[str, Any],
+    ) -> WitnessActionContext:
+        risk_category = witness_context.get("risk_category")
+        action_class = self._witness_action_class(action_name, risk_category=risk_category)
+        sensitive_input = bool(
+            witness_context.get("sensitive_input")
+            or target.get("text_redacted")
+            or target.get("sensitive")
+            or action_name in {"social_login"}
+        )
+        stores_auth_material = bool(
+            witness_context.get("stores_auth_material")
+            or action_name in {"save_auth_profile", "save_storage_state"}
+        )
+        return WitnessActionContext(
+            action=action_name,
+            action_class=action_class,  # type: ignore[arg-type]
+            risk_category=risk_category,
+            target=target,
+            approval_id=(witness_context.get("approval_id") or target.get("approval_id")),
+            approval_status=witness_context.get("approval_status"),
+            sensitive_input=sensitive_input,
+            stores_auth_material=stores_auth_material,
+            runtime_requires_approval=bool(witness_context.get("runtime_requires_approval")),
+        )
+
     @staticmethod
     def _action_verification(
         action_name: str,
@@ -3654,6 +4105,7 @@ class BrowserManager:
             "downloads": session.downloads[-20:],
             "last_action": session.last_action,
             "trace_path": str(session.trace_path),
+            "protection_mode": session.protection_mode,
         }
 
     async def get_session_summary(self, session_id: str) -> dict[str, Any]:

@@ -167,6 +167,16 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
             "SESSION_ISOLATION_MODE is not docker_ephemeral; keep single-tenant/shared-browser usage explicit"
         )
 
+    if settings.witness_protection_mode_default == "confidential":
+        if settings.session_isolation_mode != "docker_ephemeral":
+            report.warnings.append(
+                "WITNESS_PROTECTION_MODE_DEFAULT=confidential is strongest with SESSION_ISOLATION_MODE=docker_ephemeral"
+            )
+        if not settings.require_auth_state_encryption:
+            report.warnings.append(
+                "WITNESS_PROTECTION_MODE_DEFAULT=confidential should be paired with REQUIRE_AUTH_STATE_ENCRYPTION=true"
+            )
+
     takeover_host = (urlparse(settings.takeover_url).hostname or "").strip().lower()
     if takeover_host in LOCAL_HOSTS and not settings.isolated_tunnel_enabled:
         report.warnings.append(

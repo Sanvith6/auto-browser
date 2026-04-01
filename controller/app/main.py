@@ -70,7 +70,7 @@ from .vision_target import VisionTargeter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_VERSION = "0.5.2"
+_VERSION = "0.5.3"
 
 settings = get_settings()
 manager = BrowserManager(settings)
@@ -420,6 +420,7 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
             user_agent=payload.user_agent,
+            protection_mode=payload.protection_mode,
             totp_secret=payload.totp_secret,
         )
     except ValueError as exc:
@@ -1188,6 +1189,16 @@ async def get_session_audit(
         "session_id": session_id,
         "count": len(events),
         "events": [e.model_dump() for e in events],
+    }
+
+
+@app.get("/sessions/{session_id}/witness")
+async def get_session_witness(session_id: str, limit: int = 100) -> dict:
+    receipts = await manager.list_witness_receipts(session_id, limit=min(limit, 5000))
+    return {
+        "session_id": session_id,
+        "count": len(receipts),
+        "receipts": receipts,
     }
 
 

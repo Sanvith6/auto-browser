@@ -1,5 +1,6 @@
 import random
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     auth_root: str = Field("/data/auth", alias="AUTH_ROOT")
     approval_root: str = Field("/data/approvals", alias="APPROVAL_ROOT")
     audit_root: str = Field("/data/audit", alias="AUDIT_ROOT")
+    witness_root: str = Field("/data/witness", alias="WITNESS_ROOT")
     state_db_path: str | None = Field(None, alias="STATE_DB_PATH")
     audit_max_events: int = Field(10000, alias="AUDIT_MAX_EVENTS")
     session_store_root: str = Field("/data/sessions", alias="SESSION_STORE_ROOT")
@@ -149,6 +151,11 @@ class Settings(BaseSettings):
     max_sessions: int = Field(1, alias="MAX_SESSIONS")
     require_approval_for_uploads: bool = Field(True, alias="REQUIRE_APPROVAL_FOR_UPLOADS")
     approval_ttl_minutes: int = Field(15, alias="APPROVAL_TTL_MINUTES")
+    witness_enabled: bool = Field(True, alias="WITNESS_ENABLED")
+    witness_protection_mode_default: Literal["normal", "confidential"] = Field(
+        "normal",
+        alias="WITNESS_PROTECTION_MODE_DEFAULT",
+    )
     enable_tracing: bool = Field(True, alias="ENABLE_TRACING")
     typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")

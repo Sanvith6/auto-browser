@@ -128,6 +128,10 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CreateSessionRequest(storage_state_path="state.json", auth_profile="outlook-default")
 
+    def test_create_session_accepts_protection_mode(self) -> None:
+        req = CreateSessionRequest(start_url="https://example.com", protection_mode="confidential")
+        self.assertEqual(req.protection_mode, "confidential")
+
     def test_text_target_payload_redacts_sensitive_values(self) -> None:
         redacted = BrowserManager._text_target_payload(
             {"selector": "#password"},

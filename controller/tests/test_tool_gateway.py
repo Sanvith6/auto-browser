@@ -227,6 +227,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "proxy_username": "alice",
                     "proxy_password": "secret",
                     "user_agent": "AutoBrowserTest/1.0",
+                    "protection_mode": "confidential",
                     "totp_secret": "JBSWY3DPEHPK3PXP",
                 },
             )
@@ -242,6 +243,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             request_proxy_username="alice",
             request_proxy_password="secret",
             user_agent="AutoBrowserTest/1.0",
+            protection_mode="confidential",
             totp_secret="JBSWY3DPEHPK3PXP",
         )
 

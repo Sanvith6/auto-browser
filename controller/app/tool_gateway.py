@@ -737,6 +737,7 @@ class McpToolGateway:
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
             user_agent=payload.user_agent,
+            protection_mode=payload.protection_mode,
             totp_secret=payload.totp_secret,
         )
 

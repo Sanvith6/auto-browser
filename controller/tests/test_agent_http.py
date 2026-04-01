@@ -146,6 +146,39 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["error"], "Provider unavailable")
 
+    def test_session_witness_returns_receipts(self) -> None:
+        list_witness = AsyncMock(
+            return_value=[
+                {
+                    "receipt_id": "rcpt-1",
+                    "status": "ok",
+                    "action": "click",
+                    "profile": "normal",
+                }
+            ]
+        )
+
+        with patch.object(main_module.manager, "list_witness_receipts", list_witness):
+            response = self.client.get("/sessions/session-1/witness?limit=25")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "session_id": "session-1",
+                "count": 1,
+                "receipts": [
+                    {
+                        "receipt_id": "rcpt-1",
+                        "status": "ok",
+                        "action": "click",
+                        "profile": "normal",
+                    }
+                ],
+            },
+        )
+        list_witness.assert_awaited_once_with("session-1", limit=25)
+
 
 if __name__ == "__main__":
     unittest.main()

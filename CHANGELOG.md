@@ -4,6 +4,37 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-04-01
+
+### Added
+
+#### Witness receipts and protection profiles
+Added a first-pass `Witness` core inside the controller with two protection modes:
+
+- `normal` — records tamper-evident, hash-chained action receipts without adding new
+  user-facing constraints
+- `confidential` — adds stricter policy checks for high-risk actions, stronger evidence
+  restriction, and blocks unsafe auth-material handling when encryption/isolation posture
+  is too weak
+
+The controller now:
+
+- persists per-session Witness receipts under a dedicated witness store
+- attaches Witness receipt recording to session lifecycle events, browser actions,
+  human takeovers, and auth-state/profile saves
+- exposes `protection_mode` on session creation and session summaries
+- exposes `GET /sessions/{id}/witness` for receipt inspection
+
+Runtime policy now also warns when confidential mode is the default but the deployment
+is still using weak isolation or unencrypted auth-state settings.
+
+### Fixed
+
+#### Witness packaging and runtime hygiene
+- Added `WITNESS_ROOT`, `WITNESS_ENABLED`, and `WITNESS_PROTECTION_MODE_DEFAULT` to the documented environment surface
+- Added `data/witness/.gitkeep` and ignore rules so runtime receipts do not dirty the repo during local smoke runs
+- Extended HTTP and controller tests to cover the witness route, approval lifecycle recording, and confidential auth-material blocking
+
 ## [0.5.2] — 2026-03-31
 
 ### Fixed

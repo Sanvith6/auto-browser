@@ -60,24 +60,29 @@ Only copy `.env.example` if you want to change ports, providers, or allowed host
 cp .env.example .env
 ```
 
+For protection posture:
+
+- default: `WITNESS_PROTECTION_MODE_DEFAULT=normal`
+- confidential workloads: `WITNESS_PROTECTION_MODE_DEFAULT=confidential`
+
 To see the rest of the common commands:
 
 ```bash
 make help
 ```
 
-## What’s new in v0.5.2
+## What’s new in v0.5.3
 
-**Maintenance release — no API changes, all fixes are backwards compatible.**
+**Governance + runtime hardening release.**
 
-- **Python 3.10 host compatibility** — host-side controller workflows now run on the machine’s existing Python 3.10 environment
-- **`make test-local`** — editable controller packaging plus a first-class host-side test path for faster iteration without Docker
-- **Provider HTTP coverage** — `/agent/providers` and `/sessions/{id}/agent/step` now have direct HTTP-layer tests without real provider credentials
-- **Broader Ruff coverage** — CI now lints controller tests and Python helper scripts in addition to the main app package
-- **`make doctor` restricted-shell fix** — localhost socket probing now fails with a clear message instead of repeated Python tracebacks
-- **`browser-node` Xvfb cleanup** — stale `:99` lock/socket files are cleared before startup so release-smoke reruns stay stable
+- **Witness receipts** — per-session, hash-chained action receipts for session lifecycle events, approvals, browser actions, takeovers, and auth-material handling
+- **Two protection modes** — `normal` records serious concerns without adding workflow friction; `confidential` blocks unsafe high-risk execution when operator identity, isolation, or auth-state posture is too weak
+- **Session-scoped protection configuration** — `CreateSessionRequest.protection_mode` overrides `WITNESS_PROTECTION_MODE_DEFAULT`
+- **Witness inspection endpoint** — `GET /sessions/{id}/witness`
+- **Approval lifecycle recording** — pending, approved, rejected, and executed approvals now land in Witness as part of the same system of record
+- **Packaged environment surface** — `.env.example` now documents `WITNESS_ROOT`, `WITNESS_ENABLED`, and `WITNESS_PROTECTION_MODE_DEFAULT`
 
-All 152 tests pass.
+All 160 tests pass.
 
 ---
 
@@ -112,6 +117,8 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 - **durable session metadata** under `/data/sessions`, with optional Redis backing
 - **durable agent job records** under `/data/jobs` with background workers for queued step/run requests
 - **audit events** with per-request operator identity headers
+- **Witness receipts** with per-session hash-chained action evidence
+- **protection profiles** for `normal` and `confidential` workloads
 - optional **SQLite backing** for approvals + audit events
 - optional built-in REST agent runner for **OpenAI, Claude, and Gemini**
 - one-step and multi-step **REST agent orchestration endpoints**
