@@ -34,3 +34,4 @@ data/cli-home/*
 !data/cli-home/.gitkeep
 __pycache__/
 *.pyc
+controller/*.egg-info/

@@ -4,6 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### Dependency security updates
+- bumped Python `cryptography` from `46.0.5` to `46.0.6` to clear `GHSA-m959-cc7f-wv43` / `CVE-2026-34073`
+- bumped controller and browser-node `playwright` from `1.52.0` to `1.56.0` to clear `GHSA-7mvr-c777-76hp` / `CVE-2025-59288`
+
 ### Added
 
 #### Hosted Witness forwarding from the controller
