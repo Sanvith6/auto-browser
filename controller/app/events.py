@@ -69,7 +69,7 @@ def _dispatch(session_id: str, event: dict[str, Any]) -> None:
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
-            pass
+            logger.debug("SSE queue full for global subscriber — dropping event")
 
 
 # ── Public emit helpers ──────────────────────────────────────────────────────
