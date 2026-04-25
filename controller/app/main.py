@@ -1101,33 +1101,33 @@ async def screenshot_compare(session_id: str) -> dict:
 @app.get("/sessions/{session_id}/replay", response_class=HTMLResponse)
 async def session_replay(session_id: str) -> HTMLResponse:
     """Session replay — HTML viewer showing screenshots, audit events, and approvals."""
-    _require_safe_segment(session_id, field="session_id")
+    safe_session_id = _require_safe_segment(session_id, field="session_id")
 
     # Gather screenshots, constrained to the artifact root.
     artifact_root = Path(settings.artifact_root).resolve()
-    artifact_dir = (artifact_root / session_id).resolve()
+    artifact_dir = (artifact_root / safe_session_id).resolve()
     if not artifact_dir.is_relative_to(artifact_root):
         raise HTTPException(status_code=400, detail="Invalid session_id")
     screenshots: list[tuple[str, str]] = []  # (url, label)
     if artifact_dir.is_dir():
         for f in sorted(artifact_dir.glob("*.png")):
             label = f.stem.replace("-", " ")
-            screenshots.append((f"/artifacts/{session_id}/{f.name}", label))
+            screenshots.append((f"/artifacts/{safe_session_id}/{f.name}", label))
 
     # Gather audit events for this session
     try:
-        events = await manager.list_audit_events(session_id=session_id, limit=200)
+        events = await manager.list_audit_events(session_id=safe_session_id, limit=200)
     except Exception:
         events = []
 
     # Gather session info
     session_info: dict = {}
     try:
-        session = manager.sessions.get(session_id)
+        session = manager.sessions.get(safe_session_id)
         if session:
             session_info = await manager._session_summary(session)
         else:
-            record = await manager.session_store.get(session_id)
+            record = await manager.session_store.get(safe_session_id)
             session_info = record.model_dump()
     except Exception:
         pass
@@ -1181,7 +1181,7 @@ async def session_replay(session_id: str) -> HTMLResponse:
 <body>
 <h1>Session Replay</h1>
 <div class="meta">
-  <span>ID: <strong>{esc(session_id)}</strong></span>
+  <span>ID: <strong>{esc(safe_session_id)}</strong></span>
   <span>Status: <strong>{status}</strong></span>
   <span>Created: {created}</span>
   <span>Title: {title}</span>
@@ -1202,9 +1202,9 @@ async def session_replay(session_id: str) -> HTMLResponse:
 @app.get("/auth-profiles/{profile_name}/export")
 async def export_auth_profile(profile_name: str):
     """Download an auth profile as a .tar.gz archive."""
-    _require_safe_segment(profile_name, field="profile_name")
+    safe_profile_name = _require_safe_segment(profile_name, field="profile_name")
     try:
-        result = await manager.export_auth_profile(profile_name)
+        result = await manager.export_auth_profile(safe_profile_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except Exception as exc:
