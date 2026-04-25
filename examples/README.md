@@ -6,6 +6,7 @@ More walkthroughs:
 
 - `claude-desktop-setup.md`
 - `login-and-save-profile.md`
+- `orangehrm-attendance.md`
 - `fill-a-form.md`
 - `extract-feed-posts.md`
 - `claude_desktop_config.json`
