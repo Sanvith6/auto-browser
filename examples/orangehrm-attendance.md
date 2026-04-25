@@ -104,10 +104,12 @@ api_get() {
 
 retry() {
   local tries="$1"; shift
-  local i
+  local i base delay
+  base="${RETRY_BASE_DELAY_SECONDS:-1}"
   for i in $(seq 1 "$tries"); do
     if "$@"; then return 0; fi
-    sleep 2
+    delay=$(( base * (2 ** (i - 1)) ))
+    sleep "$delay"
   done
   return 1
 }
