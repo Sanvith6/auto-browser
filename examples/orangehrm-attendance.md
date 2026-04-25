@@ -128,7 +128,11 @@ SESSION_JSON="$(api_post /sessions "$SESSION_CREATE_BODY" || true)"
 SESSION_ID="$(echo "$SESSION_JSON" | jq -r '.session_id // .id // empty')"
 if [[ -z "$SESSION_ID" ]]; then
   SESSION_JSON="$(api_post /sessions "$(jq -nc --arg n "orangehrm-attendance-${ACTION}" --arg u "$LOGIN_URL" '{name:$n,start_url:$u}')")"
-  SESSION_ID="$(echo "$SESSION_JSON" | jq -r '.session_id // .id')"
+  SESSION_ID="$(echo "$SESSION_JSON" | jq -r '.session_id // .id // empty')"
+fi
+if [[ -z "$SESSION_ID" ]]; then
+  echo "Failed to create browser session for ${LOGIN_URL}" >&2
+  exit 10
 fi
 
 echo "SESSION_ID=$SESSION_ID"
@@ -140,7 +144,7 @@ PAGE_TEXT="$(echo "$OBSERVE" | jq -r '[.text_excerpt, .ocr.text_excerpt, (.inter
 if echo "$PAGE_TEXT" | grep -Eiq 'login|username|password'; then
   retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='username']" --arg t "$USERNAME" '{selector:$s,text:$t,clear_first:true}')"
   retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='password']" --arg t "$PASSWORD" '{selector:$s,text:$t,clear_first:true,sensitive:true}')"
-  retry 3 api_post "/sessions/${SESSION_ID}/actions/click" '{"selector":"button[type='\''submit'\'']"}'
+  retry 3 api_post "/sessions/${SESSION_ID}/actions/click" "$(jq -nc --arg s "button[type='submit']" '{selector:$s}')"
 fi
 
 api_post "/sessions/${SESSION_ID}/actions/wait" '{"wait_ms":2500}' >/dev/null
