@@ -84,6 +84,8 @@ ACTION="${1:-in}"   # in | out
 USERNAME="${USERNAME:?set USERNAME}"
 PASSWORD="${PASSWORD:?set PASSWORD}"
 AUTH_PROFILE="${AUTH_PROFILE:-orangehrm-default}"
+AUDIT_LIMIT="${AUDIT_LIMIT:-200}"
+WITNESS_LIMIT="${WITNESS_LIMIT:-100}"
 
 HDRS=(-H 'content-type: application/json')
 if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
@@ -136,9 +138,9 @@ OBSERVE="$(api_post "/sessions/${SESSION_ID}/observe" '{"preset":"rich","limit":
 PAGE_TEXT="$(echo "$OBSERVE" | jq -r '[.text_excerpt, .ocr.text_excerpt, (.interactables[]?.label)] | map(select(.!=null)) | join(" ")')"
 
 if echo "$PAGE_TEXT" | grep -Eiq 'login|username|password'; then
-  retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='username']" --arg t "$USERNAME" '{selector:$s,text:$t,clear_first:true}')" >/dev/null
-  retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='password']" --arg t "$PASSWORD" '{selector:$s,text:$t,clear_first:true,sensitive:true}')" >/dev/null
-  retry 3 api_post "/sessions/${SESSION_ID}/actions/click" '{"selector":"button[type='\''submit'\'']"}' >/dev/null
+  retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='username']" --arg t "$USERNAME" '{selector:$s,text:$t,clear_first:true}')"
+  retry 3 api_post "/sessions/${SESSION_ID}/actions/type" "$(jq -nc --arg s "input[name='password']" --arg t "$PASSWORD" '{selector:$s,text:$t,clear_first:true,sensitive:true}')"
+  retry 3 api_post "/sessions/${SESSION_ID}/actions/click" '{"selector":"button[type='\''submit'\'']"}'
 fi
 
 api_post "/sessions/${SESSION_ID}/actions/wait" '{"wait_ms":2500}' >/dev/null
@@ -204,8 +206,8 @@ if [[ "$ACTION" == "out" ]] && ! echo "$TEXT_AFTER" | grep -Eiq 'punched out|che
 fi
 
 # 9) Audit / receipts
-api_get "/sessions/${SESSION_ID}/audit?limit=200" | jq '.count'
-api_get "/sessions/${SESSION_ID}/witness?limit=100" | jq '.count'
+api_get "/sessions/${SESSION_ID}/audit?limit=${AUDIT_LIMIT}" | jq '.count'
+api_get "/sessions/${SESSION_ID}/witness?limit=${WITNESS_LIMIT}" | jq '.count'
 
 echo "Attendance ${ACTION} completed for session ${SESSION_ID}"
 ```
@@ -230,10 +232,10 @@ crontab -e
 
 ```cron
 # Punch-in at 09:00 weekdays
-0 9 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
+0 9 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%U' ~/.orangehrm_attendance_env)" = "$USER" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
 
 # Punch-out at 18:00 weekdays
-0 18 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
+0 18 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%U' ~/.orangehrm_attendance_env)" = "$USER" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
 ```
 
 Create the env file with secure permissions first:
