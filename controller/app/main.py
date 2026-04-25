@@ -1105,11 +1105,16 @@ async def session_replay(session_id: str) -> HTMLResponse:
 
     # Gather screenshots, constrained to the artifact root.
     artifact_root = Path(settings.artifact_root).resolve()
-    artifact_dir = (artifact_root / safe_session_id).resolve()
-    if not artifact_dir.is_relative_to(artifact_root):
-        raise HTTPException(status_code=400, detail="Invalid session_id")
+    artifact_dir: Path | None = None
+    if artifact_root.is_dir():
+        for child in artifact_root.iterdir():
+            if child.name == safe_session_id and child.is_dir():
+                candidate = child.resolve()
+                if candidate.is_relative_to(artifact_root):
+                    artifact_dir = candidate
+                break
     screenshots: list[tuple[str, str]] = []  # (url, label)
-    if artifact_dir.is_dir():
+    if artifact_dir is not None:
         for f in sorted(artifact_dir.glob("*.png")):
             label = f.stem.replace("-", " ")
             screenshots.append((f"/artifacts/{safe_session_id}/{f.name}", label))
