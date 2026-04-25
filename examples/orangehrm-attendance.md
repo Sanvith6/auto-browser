@@ -109,12 +109,15 @@ retry() {
   local i base max_delay delay
   base="${RETRY_BASE_DELAY_SECONDS:-1}"
   max_delay="${RETRY_MAX_DELAY_SECONDS:-8}"
+  delay="$base"
   for i in $(seq 1 "$tries"); do
     if "$@"; then return 0; fi
-    # Shell exponential backoff: 1s, 2s, 4s... with a configurable cap
-    delay=$(( base * (2 ** (i - 1)) ))
+    # Shell exponential backoff with a configurable cap
     if (( delay > max_delay )); then delay="$max_delay"; fi
     sleep "$delay"
+    if (( delay < max_delay )); then
+      delay=$(( delay * 2 ))
+    fi
   done
   return 1
 }
@@ -125,11 +128,12 @@ SESSION_CREATE_BODY=$(jq -nc \
   --arg u "$LOGIN_URL" \
   --arg p "$AUTH_PROFILE" \
   '{name:$n,start_url:$u,auth_profile:$p}')
+SESSION_CREATE_FALLBACK_BODY="$(jq -nc --arg n "orangehrm-attendance-${ACTION}" --arg u "$LOGIN_URL" '{name:$n,start_url:$u}')"
 
 SESSION_JSON="$(api_post /sessions "$SESSION_CREATE_BODY" || true)"
 SESSION_ID="$(echo "$SESSION_JSON" | jq -r '.session_id // .id // empty')"
 if [[ -z "$SESSION_ID" ]]; then
-  SESSION_JSON="$(api_post /sessions "$(jq -nc --arg n "orangehrm-attendance-${ACTION}" --arg u "$LOGIN_URL" '{name:$n,start_url:$u}')")"
+  SESSION_JSON="$(api_post /sessions "$SESSION_CREATE_FALLBACK_BODY")"
   SESSION_ID="$(echo "$SESSION_JSON" | jq -r '.session_id // .id // empty')"
 fi
 if [[ -z "$SESSION_ID" ]]; then
@@ -238,10 +242,10 @@ crontab -e
 
 ```cron
 # Punch-in at 09:00 weekdays
-0 9 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%U' ~/.orangehrm_attendance_env)" = "$USER" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
+0 9 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%u' ~/.orangehrm_attendance_env)" = "$(id -u)" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
 
 # Punch-out at 18:00 weekdays
-0 18 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%U' ~/.orangehrm_attendance_env)" = "$USER" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
+0 18 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && [ "$(stat -c '%u' ~/.orangehrm_attendance_env)" = "$(id -u)" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
 ```
 
 Create the env file with secure permissions first:
