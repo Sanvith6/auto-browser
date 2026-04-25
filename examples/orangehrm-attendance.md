@@ -22,7 +22,7 @@ This guide implements a reusable attendance workflow with:
 ## 1) Start locally and verify endpoints
 
 ```bash
-cd /path/to/auto-browser
+cd ~/auto-browser
 docker compose up --build
 ```
 
@@ -63,7 +63,7 @@ REQUEST_RATE_LIMIT_ENABLED=true
 Restart after env changes:
 
 ```bash
-cd /path/to/auto-browser
+cd ~/auto-browser
 docker compose up --build
 ```
 
@@ -227,10 +227,20 @@ crontab -e
 
 ```cron
 # Punch-in at 09:00 weekdays
-0 9 * * 1-5 USERNAME='your-username' PASSWORD='your-password' AUTH_PROFILE='orangehrm-default' /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
+0 9 * * 1-5 . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
 
 # Punch-out at 18:00 weekdays
-0 18 * * 1-5 USERNAME='your-username' PASSWORD='your-password' AUTH_PROFILE='orangehrm-default' /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
+0 18 * * 1-5 . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
+```
+
+Create `~/.orangehrm_attendance_env` with `chmod 600` and put:
+
+```bash
+export USERNAME='your-username'
+export PASSWORD='your-password'
+export AUTH_PROFILE='orangehrm-default'
+export API_BEARER_TOKEN='optional-token'
+export OPERATOR_ID='ops'
 ```
 
 ---
