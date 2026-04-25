@@ -864,8 +864,6 @@ async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
         raise HTTPException(status_code=400, detail="Invalid request") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Internal error") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
 
 
 @app.post("/sessions/{session_id}/social/comment")
