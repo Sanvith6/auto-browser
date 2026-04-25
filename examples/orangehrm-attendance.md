@@ -22,7 +22,7 @@ This guide implements a reusable attendance workflow with:
 ## 1) Start locally and verify endpoints
 
 ```bash
-cd /home/runner/work/auto-browser/auto-browser
+cd /path/to/auto-browser
 docker compose up --build
 ```
 
@@ -63,7 +63,7 @@ REQUEST_RATE_LIMIT_ENABLED=true
 Restart after env changes:
 
 ```bash
-cd /home/runner/work/auto-browser/auto-browser
+cd /path/to/auto-browser
 docker compose up --build
 ```
 
@@ -254,4 +254,3 @@ After each run:
 1. Validate full flow with a non-critical test account first.
 2. Confirm duplicate guard behavior for both directions.
 3. Move to production credentials only after authorized sign-off.
-
