@@ -108,6 +108,7 @@ retry() {
   base="${RETRY_BASE_DELAY_SECONDS:-1}"
   for i in $(seq 1 "$tries"); do
     if "$@"; then return 0; fi
+    # Bash exponential backoff: 1s, 2s, 4s... (configurable via RETRY_BASE_DELAY_SECONDS)
     delay=$(( base * (2 ** (i - 1)) ))
     sleep "$delay"
   done
