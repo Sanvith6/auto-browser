@@ -227,13 +227,20 @@ crontab -e
 
 ```cron
 # Punch-in at 09:00 weekdays
-0 9 * * 1-5 . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
+0 9 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh in >> /tmp/orangehrm-punch-in.log 2>&1
 
 # Punch-out at 18:00 weekdays
-0 18 * * 1-5 . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
+0 18 * * 1-5 [ -f ~/.orangehrm_attendance_env ] && [ "$(stat -c '%a' ~/.orangehrm_attendance_env)" = "600" ] && . ~/.orangehrm_attendance_env && /tmp/orangehrm_attendance.sh out >> /tmp/orangehrm-punch-out.log 2>&1
 ```
 
-Create `~/.orangehrm_attendance_env` with `chmod 600` and put:
+Create the env file with secure permissions first:
+
+```bash
+(umask 077; : > ~/.orangehrm_attendance_env)
+chmod 600 ~/.orangehrm_attendance_env
+```
+
+Then put:
 
 ```bash
 export USERNAME='your-username'
