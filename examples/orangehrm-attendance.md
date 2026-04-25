@@ -106,12 +106,14 @@ api_get() {
 
 retry() {
   local tries="$1"; shift
-  local i base delay
+  local i base max_delay delay
   base="${RETRY_BASE_DELAY_SECONDS:-1}"
+  max_delay="${RETRY_MAX_DELAY_SECONDS:-8}"
   for i in $(seq 1 "$tries"); do
     if "$@"; then return 0; fi
-    # Bash exponential backoff: 1s, 2s, 4s... (configurable via RETRY_BASE_DELAY_SECONDS)
+    # Shell exponential backoff: 1s, 2s, 4s... with a configurable cap
     delay=$(( base * (2 ** (i - 1)) ))
+    if (( delay > max_delay )); then delay="$max_delay"; fi
     sleep "$delay"
   done
   return 1
