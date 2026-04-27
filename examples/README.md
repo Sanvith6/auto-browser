@@ -8,8 +8,11 @@ More walkthroughs:
 - `login-and-save-profile.md`
 - `fill-a-form.md`
 - `extract-feed-posts.md`
-- `youtube_search_and_play.py`
 - `claude_desktop_config.json`
+
+## Code examples
+
+- `youtube_search_and_play.py`
 
 ## 1. Create a session
 
