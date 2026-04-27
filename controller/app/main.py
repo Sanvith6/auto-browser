@@ -1677,6 +1677,7 @@ async def create_cron_job(payload: CreateCronJobInput) -> dict:
             goal=payload.goal,
             provider=payload.provider,
             schedule=payload.schedule,
+            timezone=payload.timezone,
             start_url=payload.start_url,
             auth_profile=payload.auth_profile,
             proxy_persona=payload.proxy_persona,
