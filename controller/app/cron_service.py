@@ -12,7 +12,6 @@ Job schema:
     "name":        str,
     "provider":    str,
     "schedule":    str (cron expr, e.g. "0 9 * * 1-5") or null for webhook-only,
-    "timezone":    str | null (IANA timezone like "Asia/Kolkata", defaults to scheduler timezone),
     "enabled":     bool,
     "webhook_key": str | null (secret key for POST /crons/{id}/trigger),
     "goal":        str (natural language goal for agent),
@@ -102,7 +101,6 @@ class CronService:
         goal: str,
         provider: str = "openai",
         schedule: str | None = None,
-        timezone: str | None = None,
         start_url: str | None = None,
         auth_profile: str | None = None,
         proxy_persona: str | None = None,
@@ -123,7 +121,6 @@ class CronService:
                 "name": name,
                 "provider": provider,
                 "schedule": schedule,
-                "timezone": timezone,
                 "enabled": enabled,
                 "webhook_key": webhook_key,
                 "goal": goal,
@@ -159,7 +156,7 @@ class CronService:
             if job_id not in jobs:
                 raise KeyError(f"Cron job not found: {job_id}")
             job = jobs[job_id]
-            allowed = {"name", "goal", "provider", "schedule", "timezone", "enabled", "start_url",
+            allowed = {"name", "goal", "provider", "schedule", "enabled", "start_url",
                        "auth_profile", "proxy_persona", "max_steps"}
             for k, v in updates.items():
                 if k in allowed:
@@ -222,7 +219,7 @@ class CronService:
         if not _APSCHEDULER_AVAILABLE or self._scheduler is None:
             return
         try:
-            trigger = CronTrigger.from_crontab(job["schedule"], timezone=job.get("timezone"))
+            trigger = CronTrigger.from_crontab(job["schedule"])
             self._scheduler.add_job(
                 self._scheduled_run,
                 trigger=trigger,
@@ -230,12 +227,7 @@ class CronService:
                 args=[job["id"]],
                 replace_existing=True,
             )
-            logger.info(
-                "registered cron job %s: %s (tz=%s)",
-                job["id"],
-                job["schedule"],
-                job.get("timezone") or "scheduler-default",
-            )
+            logger.info("registered cron job %s: %s", job["id"], job["schedule"])
         except Exception as exc:
             logger.warning("failed to register cron job %s: %s", job["id"], exc)
 
@@ -285,7 +277,6 @@ class CronService:
 
         return {
             "triggered": True,
-            "status": "queued",
             "job_id": job_id,
             "session_id": session_id,
             "queued_job": queued,
