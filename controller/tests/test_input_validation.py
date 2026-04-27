@@ -142,6 +142,24 @@ class RequestValidationTests(unittest.TestCase):
         self.assertTrue(payload.webhook_enabled)
         self.assertEqual(payload.provider, "openai")
 
+    def test_create_cron_job_accepts_kolkata_timezone(self) -> None:
+        payload = CreateCronJobInput(
+            name="daily",
+            goal="check inbox",
+            webhook_enabled=True,
+            timezone="Asia/Kolkata",
+        )
+        self.assertEqual(payload.timezone, "Asia/Kolkata")
+
+    def test_create_cron_job_rejects_invalid_timezone(self) -> None:
+        with self.assertRaises(ValidationError):
+            CreateCronJobInput(
+                name="daily",
+                goal="check inbox",
+                webhook_enabled=True,
+                timezone="Mars/Olympus",
+            )
+
     def test_create_cron_job_rejects_invalid_start_url(self) -> None:
         with self.assertRaises(ValidationError):
             CreateCronJobInput(
@@ -237,6 +255,7 @@ class CronServiceProxyPersonaTests(unittest.IsolatedAsyncioTestCase):
         result = await self.cron.trigger_job(job["id"])
 
         self.assertTrue(result["triggered"])
+        self.assertEqual(result["status"], "queued")
         self.manager.create_session.assert_awaited_once_with(
             name=f"cron-{job['id']}",
             start_url="https://example.com",
