@@ -12,6 +12,9 @@ QUERY = os.getenv("YOUTUBE_QUERY", "Shape of You Ed Sheeran")
 SEARCH_INPUT_SELECTOR = 'input[name="search_query"]'
 SEARCH_BUTTON_SELECTOR = "button#search-icon-legacy"
 FIRST_VIDEO_SELECTOR = "ytd-video-renderer a#video-title"
+CLICK_DELAY_SECONDS = 0.8
+PAGE_LOAD_DELAY_SECONDS = 2.0
+SEARCH_RESULTS_DELAY_SECONDS = 2.0
 
 
 def _session_id(session: dict) -> str:
@@ -24,7 +27,7 @@ def _session_id(session: dict) -> str:
 def _click_optional(client: AutoBrowserClient, session_id: str, selector: str) -> None:
     try:
         client.click(session_id, selector=selector)
-        time.sleep(0.8)
+        time.sleep(CLICK_DELAY_SECONDS)
     except Exception:
         return
 
@@ -34,14 +37,14 @@ def main() -> None:
         session = client.create_session(name="youtube-search", start_url="https://www.youtube.com")
         session_id = _session_id(session)
 
-        time.sleep(2)
+        time.sleep(PAGE_LOAD_DELAY_SECONDS)
         _click_optional(client, session_id, 'button:has-text("Accept all")')
         _click_optional(client, session_id, 'button:has-text("I agree")')
 
         client.type_text(session_id, QUERY, selector=SEARCH_INPUT_SELECTOR)
         client.click(session_id, selector=SEARCH_BUTTON_SELECTOR)
 
-        time.sleep(2)
+        time.sleep(SEARCH_RESULTS_DELAY_SECONDS)
         client.click(session_id, selector=FIRST_VIDEO_SELECTOR)
 
         takeover_url = session.get("takeover_url")
