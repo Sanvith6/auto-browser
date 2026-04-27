@@ -22,15 +22,20 @@ VIDEO_LOAD_TIMEOUT_SECONDS = 15
 def _session_id(session: dict) -> str:
     session_id = session.get("id") or session.get("session_id")
     if not session_id:
-        raise RuntimeError(f"Create session response missing id: {session}")
+        raise RuntimeError(
+            "Session response missing required id field (expected 'id' or 'session_id'): "
+            f"{session}"
+        )
     return str(session_id)
 
 
 def _click_optional(client: AutoBrowserClient, session_id: str, selector: str) -> None:
     try:
         client.click(session_id, selector=selector)
-    except AutoBrowserError:
-        return
+    except AutoBrowserError as exc:
+        if exc.status_code in {400, 404}:
+            return
+        raise
 
 
 def _wait_for_url_contains(
@@ -40,13 +45,17 @@ def _wait_for_url_contains(
     timeout_seconds: float,
 ) -> None:
     deadline = time.time() + timeout_seconds
+    last_url = ""
     while time.time() < deadline:
         observation = client.observe(session_id, preset="fast")
         url = observation.get("url", "")
+        last_url = url or last_url
         if fragment in url:
             return
         time.sleep(POLL_INTERVAL_SECONDS)
-    raise TimeoutError(f"Timed out waiting for URL to include {fragment!r}.")
+    raise TimeoutError(
+        f"Timed out waiting for URL to include {fragment!r}. Last URL observed: {last_url!r}"
+    )
 
 
 def main() -> None:
