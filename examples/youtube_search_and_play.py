@@ -22,14 +22,16 @@ VIDEO_LOAD_TIMEOUT_SECONDS = 15
 def _session_id(session: dict) -> str:
     session_id = session.get("id") or session.get("session_id")
     if not session_id:
+        available_keys = ", ".join(sorted(session.keys()))
         raise RuntimeError(
-            "Session response missing required id field (expected 'id' or 'session_id'): "
-            f"{session}"
+            "Session response missing required id field (expected 'id' or 'session_id'). "
+            f"Available keys: {available_keys}"
         )
     return str(session_id)
 
 
 def _click_optional(client: AutoBrowserClient, session_id: str, selector: str) -> None:
+    """Attempt to click a selector, ignoring 400/404s when optional UI elements are absent."""
     try:
         client.click(session_id, selector=selector)
     except AutoBrowserError as exc:
@@ -48,9 +50,10 @@ def _wait_for_url_contains(
     last_url = ""
     while time.time() < deadline:
         observation = client.observe(session_id, preset="fast")
-        url = observation.get("url", "")
-        last_url = url or last_url
-        if fragment in url:
+        url = observation.get("url")
+        if url is not None:
+            last_url = url
+        if url and fragment in url:
             return
         time.sleep(POLL_INTERVAL_SECONDS)
     raise TimeoutError(
