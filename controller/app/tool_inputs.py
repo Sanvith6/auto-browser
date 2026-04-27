@@ -7,7 +7,6 @@ logic rather than schema definitions.
 from __future__ import annotations
 
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator, model_validator
 
@@ -460,7 +459,6 @@ class CreateCronJobInput(StrictInputModel):
     goal: str = Field(min_length=1, max_length=5000)
     provider: ProviderName = "openai"
     schedule: str | None = Field(default=None, max_length=100)
-    timezone: str | None = Field(default=None, max_length=100)
     start_url: str | None = Field(default=None, max_length=2000)
     auth_profile: str | None = Field(default=None, max_length=200)
     proxy_persona: str | None = Field(default=None, max_length=200)
@@ -474,17 +472,6 @@ class CreateCronJobInput(StrictInputModel):
         if value is None:
             return None
         return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
-
-    @field_validator("timezone")
-    @classmethod
-    def validate_timezone(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError("timezone must be a valid IANA timezone (e.g., Asia/Kolkata)") from exc
-        return value
 
     @model_validator(mode="after")
     def validate_trigger_mode(self) -> "CreateCronJobInput":
