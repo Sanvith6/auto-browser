@@ -76,6 +76,13 @@ cp .env.example .env
 make doctor
 ```
 
+For workflow credentials, keep secrets in `.env` and reference variables in your automation payloads (avoid hardcoding usernames/passwords in tracked files), for example:
+
+```bash
+ORANGEHRM_USERNAME=your-username
+ORANGEHRM_PASSWORD=your-password
+```
+
 Run `make doctor` from a normal terminal with local Docker access and permission to open localhost sockets.
 
 Open:
