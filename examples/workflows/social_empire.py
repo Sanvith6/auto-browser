@@ -8,6 +8,10 @@ Usage:
     from examples.workflows.social_empire import VIRAL_PIPELINE, SHORTS_BLITZ, WARMUP_CHECK
 
     httpx.post("http://localhost:8000/workflows/run", json=VIRAL_PIPELINE("tech gadgets", "My Channel"))
+
+Note:
+    YouTube uploads require YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and
+    YOUTUBE_REFRESH_TOKEN to be set in the controller environment.
 """
 from __future__ import annotations
 
